@@ -61,6 +61,7 @@ Detailed installation, configuration, and execution instructions will be added a
 - [Project Charter](docs/PROJECT_CHARTER.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Domain Model](docs/DOMAIN_MODEL.md)
+- [Local Development Guide](docs/LOCAL_DEVELOPMENT.md)
 
 Additional architecture documentation, ADRs, development guides, and performance reports will be added throughout the project.
 
