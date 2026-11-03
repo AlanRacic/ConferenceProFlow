@@ -1,5 +1,7 @@
 # ConferenceProFlow
 
+[![.NET CI](https://github.com/AlanRacic/ConferenceProFlow/actions/workflows/dotnet-ci.yml/badge.svg?branch=master)](https://github.com/AlanRacic/ConferenceProFlow/actions/workflows/dotnet-ci.yml)
+
 ### Distributed Conference Operations Platform
 
 ConferenceProFlow is an enterprise-style .NET backend project focused on designing, developing, and operating a distributed conference management system.
@@ -64,8 +66,10 @@ Additional architecture documentation, ADRs, development guides, and performance
 
 ## Project Status
 
-**Phase 0 — Project Planning & Architecture**
+**Phase 1 — Core Registration API (In Progress)**
 
-The project is currently in its initial planning and architecture design stage.
+The initial solution, architecture documentation, API foundation, health checks, and automated CI pipeline have been established.
 
-Implementation will proceed incrementally, with each major development phase followed by technical review and validation.
+Current development focuses on implementing the registration domain, business rules, persistence, and REST API functionality.
+
+Distributed messaging, event streaming, observability, and orchestration capabilities will be introduced in subsequent phases.
