@@ -91,6 +91,48 @@ public class RegistrationTests
         Assert.Throws<ArgumentException>(() => RegistrationEntity.Create(Guid.Empty, Guid.NewGuid(), CreatedAt));
     }
 
+    [Fact]
+    public void Confirm_RejectedRegistration_ThrowsException()
+    {
+        // Arrange
+        var registration = CreateRegistration();
+
+        registration.Reject("Session capacity exceeded.", CreatedAt.AddMinutes(1));
+
+        // Act & Assert
+        Assert.Throws<InvalidOperationException>(() => registration.Confirm(CreatedAt.AddMinutes(2)));
+
+        Assert.Equal(RegistrationStatus.Rejected, registration.Status);
+    }
+
+    [Fact]
+    public void Reject_AlreadyRejectedWithSameReason_DoesNotChangeTimestamp()
+    {
+        // Arrange
+        var registration = CreateRegistration();
+
+        var rejectedAt = CreatedAt.AddMinutes(1);
+
+        registration.Reject("Session capacity exceeded.", rejectedAt);
+
+        // Act
+        registration.Reject("Session capacity exceeded.", CreatedAt.AddMinutes(2));
+
+        // Assert
+        Assert.Equal(RegistrationStatus.Rejected, registration.Status);
+
+        Assert.Equal("Session capacity exceeded.", registration.RejectionReason);
+
+        Assert.Equal(rejectedAt, registration.UpdatedAtUtc);
+    }
+
+    [Fact]
+    public void Create_EmptySessionId_ThrowsException()
+    {
+        // Act & Assert
+        Assert.Throws<ArgumentException>(() => RegistrationEntity.Create(Guid.NewGuid(), Guid.Empty, CreatedAt));
+    }
+
     private static RegistrationEntity CreateRegistration()
     {
         return RegistrationEntity.Create(Guid.NewGuid(), Guid.NewGuid(), CreatedAt);
