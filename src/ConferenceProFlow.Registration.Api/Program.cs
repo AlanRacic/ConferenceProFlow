@@ -1,8 +1,26 @@
+using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Register application services.
 builder.Services.AddOpenApi();
 builder.Services.AddHealthChecks();
+
+builder.Services.AddDbContext<RegistrationDbContext>(
+    (serviceProvider, options) =>
+    {
+        var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+
+        var connectionString = configuration.GetConnectionString("RegistrationDb");
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new InvalidOperationException("Registration database connection string is not configured.");
+        }
+
+        options.UseSqlServer(connectionString);
+    });
 
 var app = builder.Build();
 
