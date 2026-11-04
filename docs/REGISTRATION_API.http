@@ -1,0 +1,39 @@
+@baseUrl = https://localhost:7217
+
+### Get all conferences
+
+GET {{baseUrl}}/api/conferences
+
+
+### Create a conference
+
+POST {{baseUrl}}/api/conferences
+Content-Type: application/json
+
+{
+  "name": "ConferenceProFlow Summit 2027",
+  "startsAtUtc": "2027-06-01T08:00:00Z",
+  "endsAtUtc": "2027-06-02T18:00:00Z"
+}
+
+
+### Get a conference by ID
+
+GET {{baseUrl}}/api/conferences/REPLACE_WITH_CONFERENCE_ID
+
+
+### Create a conference session
+
+POST {{baseUrl}}/api/conferences/REPLACE_WITH_CONFERENCE_ID/sessions
+Content-Type: application/json
+
+{
+  "title": "Building Distributed Systems with .NET",
+  "startsAtUtc": "2027-06-01T10:00:00Z",
+  "endsAtUtc": "2027-06-01T11:30:00Z"
+}
+
+
+### Get conference sessions
+
+GET {{baseUrl}}/api/conferences/REPLACE_WITH_CONFERENCE_ID/sessions
