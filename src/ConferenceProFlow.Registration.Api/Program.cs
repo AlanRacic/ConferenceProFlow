@@ -1,3 +1,4 @@
+using ConferenceProFlow.Registration.Api.Features.Conferences;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -35,6 +36,9 @@ app.UseHttpsRedirection();
 
 // Expose the application health endpoint.
 app.MapHealthChecks("/health");
+
+// Register Conference API endpoints.
+app.MapConferenceEndpoints();
 
 app.Run();
 
