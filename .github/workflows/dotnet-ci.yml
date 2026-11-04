@@ -20,7 +20,7 @@ jobs:
 
     runs-on: ubuntu-24.04
 
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -36,6 +36,9 @@ jobs:
 
       - name: Build solution
         run: dotnet build ConferenceProFlow.slnx --configuration Release --no-restore
+
+      - name: Verify Docker availability
+        run: docker info
 
       - name: Run automated tests
         run: dotnet test ConferenceProFlow.slnx --configuration Release --no-build --verbosity normal
