@@ -2,7 +2,6 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Testcontainers.MsSql;
-using Xunit;
 
 namespace ConferenceProFlow.Registration.IntegrationTests.Infrastructure;
 

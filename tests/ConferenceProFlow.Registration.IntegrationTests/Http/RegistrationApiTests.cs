@@ -10,7 +10,6 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace ConferenceProFlow.Registration.IntegrationTests.Http;
 
@@ -62,21 +61,21 @@ public sealed class RegistrationApiTests : IDisposable
     {
         var conference = await CreateConferenceAsync();
 
-        using var response = await _client.GetAsync($"/api/conferences/{conference.Id}");
+        using var response = await _client.GetAsync($"/api/conferences/{conference.Id}", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        var saved = await response.Content.ReadFromJsonAsync<ConferenceResponse>();
+        var saved = await response.Content.ReadFromJsonAsync<ConferenceResponse>(TestContext.Current.CancellationToken);
 
         Assert.NotNull(saved);
         Assert.Equal(conference.Id, saved.Id);
         Assert.Equal(conference.Name, saved.Name);
 
-        using var listResponse = await _client.GetAsync("/api/conferences");
+        using var listResponse = await _client.GetAsync("/api/conferences", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
 
-        var conferences = await listResponse.Content.ReadFromJsonAsync<List<ConferenceResponse>>();
+        var conferences = await listResponse.Content.ReadFromJsonAsync<List<ConferenceResponse>>(TestContext.Current.CancellationToken);
 
         Assert.NotNull(conferences);
         Assert.Contains(conferences, item => item.Id == conference.Id);
@@ -90,7 +89,7 @@ public sealed class RegistrationApiTests : IDisposable
             ConferenceEnd,
             ConferenceStart);
 
-        using var response = await _client.PostAsJsonAsync("/api/conferences", request);
+        using var response = await _client.PostAsJsonAsync("/api/conferences", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -102,22 +101,22 @@ public sealed class RegistrationApiTests : IDisposable
 
         var session = await CreateSessionAsync(conference.Id);
 
-        using var response = await _client.GetAsync($"/api/conferences/{conference.Id}/sessions/{session.Id}");
+        using var response = await _client.GetAsync($"/api/conferences/{conference.Id}/sessions/{session.Id}", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        var saved = await response.Content.ReadFromJsonAsync<SessionResponse>();
+        var saved = await response.Content.ReadFromJsonAsync<SessionResponse>(TestContext.Current.CancellationToken);
 
         Assert.NotNull(saved);
         Assert.Equal(session.Id, saved.Id);
         Assert.Equal(conference.Id, saved.ConferenceId);
         Assert.False(saved.IsPublished);
 
-        using var listResponse = await _client.GetAsync($"/api/conferences/{conference.Id}/sessions");
+        using var listResponse = await _client.GetAsync($"/api/conferences/{conference.Id}/sessions", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
 
-        var sessions = await listResponse.Content.ReadFromJsonAsync<List<SessionResponse>>();
+        var sessions = await listResponse.Content.ReadFromJsonAsync<List<SessionResponse>>(TestContext.Current.CancellationToken);
 
         Assert.NotNull(sessions);
         Assert.Contains(sessions, item => item.Id == session.Id);
@@ -133,7 +132,7 @@ public sealed class RegistrationApiTests : IDisposable
             ConferenceEnd.AddDays(1),
             ConferenceEnd.AddDays(1).AddHours(1));
 
-        using var response = await _client.PostAsJsonAsync($"/api/conferences/{conference.Id}/sessions", request);
+        using var response = await _client.PostAsJsonAsync($"/api/conferences/{conference.Id}/sessions", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -143,11 +142,11 @@ public sealed class RegistrationApiTests : IDisposable
     {
         var participant = await CreateParticipantAsync();
 
-        using var response = await _client.GetAsync($"/api/participants/{participant.Id}");
+        using var response = await _client.GetAsync($"/api/participants/{participant.Id}", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        var saved = await response.Content.ReadFromJsonAsync<ParticipantResponse>();
+        var saved = await response.Content.ReadFromJsonAsync<ParticipantResponse>(TestContext.Current.CancellationToken);
 
         Assert.NotNull(saved);
         Assert.Equal(participant.Id, saved.Id);
@@ -161,7 +160,7 @@ public sealed class RegistrationApiTests : IDisposable
 
         var duplicate = new CreateParticipantRequest("Duplicate Participant", participant.Email.ToUpperInvariant());
 
-        using var response = await _client.PostAsJsonAsync("/api/participants", duplicate);
+        using var response = await _client.PostAsJsonAsync("/api/participants", duplicate, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
     }
@@ -171,7 +170,7 @@ public sealed class RegistrationApiTests : IDisposable
     {
         var request = new CreateParticipantRequest("", "invalid-name@example.com");
 
-        using var response = await _client.PostAsJsonAsync("/api/participants", request);
+        using var response = await _client.PostAsJsonAsync("/api/participants", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -185,11 +184,11 @@ public sealed class RegistrationApiTests : IDisposable
 
         var request = new CreateRegistrationRequest(participant.Id, session.Id);
 
-        using var response = await _client.PostAsJsonAsync("/api/registrations", request);
+        using var response = await _client.PostAsJsonAsync("/api/registrations", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
 
-        var registration = await response.Content.ReadFromJsonAsync<RegistrationResponse>();
+        var registration = await response.Content.ReadFromJsonAsync<RegistrationResponse>(TestContext.Current.CancellationToken);
 
         Assert.NotNull(registration);
 
@@ -199,11 +198,11 @@ public sealed class RegistrationApiTests : IDisposable
         Assert.Null(registration.RejectionReason);
 
         // Verify the registration through the GET endpoint.
-        using var getResponse = await _client.GetAsync($"/api/registrations/{registration.Id}");
+        using var getResponse = await _client.GetAsync($"/api/registrations/{registration.Id}", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
 
-        var retrieved = await getResponse.Content.ReadFromJsonAsync<RegistrationResponse>();
+        var retrieved = await getResponse.Content.ReadFromJsonAsync<RegistrationResponse>(TestContext.Current.CancellationToken);
 
         Assert.NotNull(retrieved);
         Assert.Equal(registration.Id, retrieved.Id);
@@ -214,7 +213,7 @@ public sealed class RegistrationApiTests : IDisposable
 
         var stored = await db.Registrations
             .AsNoTracking()
-            .SingleAsync(r => r.Id == registration.Id);
+            .SingleAsync(r => r.Id == registration.Id, TestContext.Current.CancellationToken);
 
         Assert.Equal(RegistrationStatus.Pending, stored.Status);
     }
@@ -228,11 +227,11 @@ public sealed class RegistrationApiTests : IDisposable
 
         var request = new CreateRegistrationRequest(participant.Id, session.Id);
 
-        using var firstResponse = await _client.PostAsJsonAsync("/api/registrations", request);
+        using var firstResponse = await _client.PostAsJsonAsync("/api/registrations", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Created, firstResponse.StatusCode);
 
-        using var secondResponse = await _client.PostAsJsonAsync("/api/registrations", request);
+        using var secondResponse = await _client.PostAsJsonAsync("/api/registrations", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Conflict, secondResponse.StatusCode);
     }
@@ -245,7 +244,7 @@ public sealed class RegistrationApiTests : IDisposable
 
         var request = new CreateRegistrationRequest(Guid.NewGuid(), session.Id);
 
-        using var response = await _client.PostAsJsonAsync("/api/registrations", request);
+        using var response = await _client.PostAsJsonAsync("/api/registrations", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -255,7 +254,7 @@ public sealed class RegistrationApiTests : IDisposable
     {
         var request = new CreateRegistrationRequest(Guid.Empty, Guid.NewGuid());
 
-        using var response = await _client.PostAsJsonAsync("/api/registrations", request);
+        using var response = await _client.PostAsJsonAsync("/api/registrations", request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
