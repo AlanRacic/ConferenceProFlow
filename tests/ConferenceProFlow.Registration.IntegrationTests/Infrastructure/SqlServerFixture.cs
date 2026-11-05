@@ -10,6 +10,8 @@ public sealed class SqlServerFixture : IAsyncLifetime
 {
     private readonly MsSqlContainer _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest").Build();
     private string? _connectionString;
+    public string ConnectionString =>
+    _connectionString ?? throw new InvalidOperationException("SQL Server test container has not been initialized.");
 
     public async ValueTask InitializeAsync()
     {

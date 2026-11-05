@@ -7,7 +7,8 @@ using RegistrationEntity = ConferenceProFlow.Registration.Api.Domain.Entities.Re
 
 namespace ConferenceProFlow.Registration.IntegrationTests.Persistence;
 
-public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixture>
+[Collection("SqlServer")]
+public sealed class RegistrationPersistenceTests
 {
     private static readonly DateTimeOffset CreatedAt = new(2026, 11, 3, 12, 0, 0, TimeSpan.Zero);
     private readonly SqlServerFixture _fixture;
