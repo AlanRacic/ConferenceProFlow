@@ -3,19 +3,36 @@ name: conferenceproflow
 services:
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
-
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_PID: "Developer"
       MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in the root .env file}"
-
     ports:
       - "127.0.0.1:14333:1433"
-
     volumes:
       - sqlserver_data:/var/opt/mssql
+    restart: unless-stopped
 
+  rabbitmq:
+    image: rabbitmq:4.2.9-management
+    hostname: conferenceproflow-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:?Set RABBITMQ_USER in the root .env file}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in the root .env file}"
+      RABBITMQ_DEFAULT_VHOST: "conferenceproflow"
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
 volumes:
   sqlserver_data:
+  rabbitmq_data:
