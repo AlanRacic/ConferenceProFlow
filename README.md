@@ -67,10 +67,73 @@ Additional architecture documentation, ADRs, development guides, and performance
 
 ## Project Status
 
-**Phase 1 — Core Registration API (In Progress)**
+**Phase 1 — Core Registration API**
 
-The initial solution, architecture documentation, API foundation, health checks, and automated CI pipeline have been established.
+The initial Registration API has been implemented and validated through automated testing.
 
-Current development focuses on implementing the registration domain, business rules, persistence, and REST API functionality.
+### Implemented
 
-Distributed messaging, event streaming, observability, and orchestration capabilities will be introduced in subsequent phases.
+- ASP.NET Core Minimal API using .NET 10.
+- Domain entities for conferences, sessions, participants, and registrations.
+- Registration lifecycle with Pending, Confirmed, and Rejected states.
+- Entity Framework Core persistence using SQL Server 2022.
+- Version-controlled database migrations.
+- Database integrity through foreign keys, unique indexes, and constraints.
+- Local SQL Server infrastructure using Docker Compose.
+- REST endpoints for conference and session management.
+- REST endpoints for participant creation and retrieval.
+- REST endpoints for creating and retrieving registration requests.
+- Duplicate participant and registration conflict handling.
+- Unit tests for registration domain behavior.
+- SQL Server persistence integration tests using Testcontainers.
+- Automated HTTP integration tests using WebApplicationFactory.
+- GitHub Actions continuous integration.
+
+New registration requests are stored with **Pending** status. Seat allocation and automatic confirmation are not yet implemented.
+
+### Current API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/conferences` | Create a conference |
+| GET | `/api/conferences` | List conferences |
+| GET | `/api/conferences/{id}` | Retrieve a conference |
+| POST | `/api/conferences/{id}/sessions` | Create a conference session |
+| GET | `/api/conferences/{id}/sessions` | List conference sessions |
+| GET | `/api/conferences/{id}/sessions/{sessionId}` | Retrieve a session |
+| POST | `/api/participants` | Create a participant |
+| GET | `/api/participants/{id}` | Retrieve a participant |
+| POST | `/api/registrations` | Create a Pending registration |
+| GET | `/api/registrations/{id}` | Retrieve registration status |
+
+Example HTTP requests are available in [`docs/REGISTRATION_API.http`](docs/REGISTRATION_API.http).
+
+Local setup and testing instructions are available in the [Local Development Guide](docs/LOCAL_DEVELOPMENT.md).
+
+### Planned Development
+
+Upcoming development phases will introduce:
+
+- Session publication and registration eligibility rules.
+- Authentication, authorization, and API security.
+- Registration request idempotency.
+- RabbitMQ-based asynchronous messaging.
+- Transactional Outbox and reliable message publishing.
+- An independent Allocation Worker with its own database.
+- Concurrency-safe capacity allocation.
+- Idempotent message processing and registration status updates.
+- Kafka-based event streaming and analytics.
+- Distributed observability and performance testing.
+- Local Kubernetes deployment.
+
+The project is developed incrementally, with architecture and implementation decisions reviewed throughout development.
+
+### Development Limitations
+
+The current HTTP API is intended for local development and automated testing.
+
+Authentication and authorization are not yet implemented. Registration requests can currently be created for unpublished sessions to support development before session publication and allocation provisioning are available.
+
+The API must not be exposed as a public production service in its current state.
+
+The completed system is intended to support reproducible local deployment without paid cloud dependencies.

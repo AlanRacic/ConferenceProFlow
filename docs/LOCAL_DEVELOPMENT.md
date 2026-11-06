@@ -72,11 +72,97 @@ Do not use `down -v` unless intentionally resetting the local database.
 
 ## Application Development
 
-The Registration API currently runs directly through Visual Studio.
+The Registration API is an ASP.NET Core Minimal API targeting .NET 10.
 
-Its existing health endpoint is available at `/health`.
+It currently runs directly through Visual Studio, while SQL Server runs locally through Docker Compose.
 
-Database persistence will be configured in the next development phase.
+### Start the Registration API
+
+Before starting the application:
+
+1. Ensure Docker Desktop is running.
+2. Start the development SQL Server using the Docker Compose instructions in this guide.
+3. Configure the Registration API connection string using ASP.NET Core User Secrets.
+4. Apply the existing EF Core migrations if the database has not yet been initialized.
+
+In Visual Studio:
+
+1. Open `ConferenceProFlow.slnx`.
+2. Set `ConferenceProFlow.Registration.Api` as the startup project.
+3. Select the HTTPS development profile.
+4. Press `F5` to start the application.
+
+The default HTTPS development profile uses:
+
+`https://localhost:7217`
+
+The health endpoint is available at:
+
+`https://localhost:7217/health`
+
+A successful response returns `Healthy`.
+
+The health endpoint currently verifies basic application availability. It does not establish that the SQL Server database is ready.
+
+### OpenAPI Documentation
+
+When running in the Development environment, the generated OpenAPI document is available at:
+
+`https://localhost:7217/openapi/v1.json`
+
+This endpoint returns an OpenAPI JSON document describing the HTTP API.
+
+An interactive Swagger UI is not currently configured.
+
+### Test HTTP Endpoints
+
+The repository contains example HTTP requests in:
+
+`docs/REGISTRATION_API.http`
+
+Open this file using Visual Studio's HTTP editor.
+
+Ensure that the Registration API and development SQL Server are running before sending requests.
+
+The file contains examples for:
+
+- Creating and retrieving conferences.
+- Creating and retrieving conference sessions.
+- Creating and retrieving participants.
+- Creating and retrieving registrations.
+- Testing duplicate participant and registration requests.
+
+Replace placeholder identifiers with the GUID values returned by the corresponding creation requests.
+
+A successful registration creation request returns HTTP `201 Created` with an initial status of `Pending`.
+
+A Pending registration does not represent a confirmed seat allocation.
+
+### Automated HTTP Integration Tests
+
+Automated HTTP integration tests are implemented using ASP.NET Core WebApplicationFactory and xUnit v3.
+
+The tests use Testcontainers to create an isolated SQL Server environment and apply the application's EF Core migrations.
+
+They validate HTTP responses, input validation, database persistence, duplicate handling, and registration status.
+
+Docker Desktop must be running before executing the integration tests.
+
+Use the automated test commands documented in the database testing section of this guide.
+
+### Current Development Limitations
+
+The initial Registration API is intended for local development and testing.
+
+Authentication and authorization are not yet implemented.
+
+Registration requests can currently be created for unpublished sessions to support development before session publication and allocation provisioning are available.
+
+Registration requests remain Pending because asynchronous capacity allocation is not yet implemented.
+
+The API is not ready for public production deployment.
+
+Future development will introduce secure access, session publication rules, reliable messaging, and the Allocation service.
 
 ## Development Principles
 
@@ -299,4 +385,4 @@ The Registration API must not directly modify the Allocation service's database.
 
 This separation establishes clear data ownership and prepares the application for asynchronous communication through messaging infrastructure.
 
-The current implementation focuses on persistence and database integrity. Registration HTTP workflows, asynchronous allocation, and Transactional Outbox processing will be introduced in subsequent milestones.
+The Registration API now supports HTTP-based creation and retrieval of Pending registration requests. Asynchronous allocation, Transactional Outbox processing, and allocation-result handling will be introduced in subsequent development phases.
