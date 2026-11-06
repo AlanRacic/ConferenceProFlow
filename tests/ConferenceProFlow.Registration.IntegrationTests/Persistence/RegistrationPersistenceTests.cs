@@ -2,12 +2,12 @@
 using ConferenceProFlow.Registration.Api.Domain.Enums;
 using ConferenceProFlow.Registration.IntegrationTests.Infrastructure;
 using Microsoft.EntityFrameworkCore;
-using Xunit;
 using RegistrationEntity = ConferenceProFlow.Registration.Api.Domain.Entities.Registration;
 
 namespace ConferenceProFlow.Registration.IntegrationTests.Persistence;
 
-public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixture>
+[Collection("SqlServer")]
+public sealed class RegistrationPersistenceTests
 {
     private static readonly DateTimeOffset CreatedAt = new(2026, 11, 3, 12, 0, 0, TimeSpan.Zero);
     private readonly SqlServerFixture _fixture;
@@ -30,7 +30,7 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
         {
             dbContext.Registrations.Add(registration);
 
-            await dbContext.SaveChangesAsync();
+            await dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Assert: Read it using a new DbContext.
@@ -38,7 +38,7 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
 
         var savedRegistration = await readContext.Registrations
             .AsNoTracking()
-            .SingleAsync(x => x.Id == registration.Id);
+            .SingleAsync(x => x.Id == registration.Id, TestContext.Current.CancellationToken);
 
         Assert.Equal(registration.Id, savedRegistration.Id);
         Assert.Equal(participantId, savedRegistration.ParticipantId);
@@ -61,7 +61,7 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
         {
             firstContext.Registrations.Add(firstRegistration);
 
-            await firstContext.SaveChangesAsync();
+            await firstContext.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Act: Attempt to save the duplicate.
@@ -70,7 +70,7 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
         secondContext.Registrations.Add(duplicateRegistration);
 
         // Assert: SQL Server rejects the duplicate.
-        await Assert.ThrowsAsync<DbUpdateException>(async () => await secondContext.SaveChangesAsync());
+        await Assert.ThrowsAsync<DbUpdateException>(async () => await secondContext.SaveChangesAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -84,7 +84,7 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
         dbContext.Registrations.Add(registration);
 
         // Act & Assert
-        await Assert.ThrowsAsync<DbUpdateException>(async () => await dbContext.SaveChangesAsync());
+        await Assert.ThrowsAsync<DbUpdateException>(async () => await dbContext.SaveChangesAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -99,7 +99,7 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
         {
             createContext.Registrations.Add(registration);
 
-            await createContext.SaveChangesAsync();
+            await createContext.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Act: Load and confirm the registration.
@@ -108,11 +108,11 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
         await using (var updateContext = _fixture.CreateDbContext())
         {
             var storedRegistration = await updateContext.Registrations
-                .SingleAsync(x => x.Id == registration.Id);
+                .SingleAsync(x => x.Id == registration.Id, TestContext.Current.CancellationToken);
 
             storedRegistration.Confirm(confirmedAt);
 
-            await updateContext.SaveChangesAsync();
+            await updateContext.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Assert: Verify the update in a new DbContext.
@@ -120,7 +120,7 @@ public sealed class RegistrationPersistenceTests : IClassFixture<SqlServerFixtur
 
         var updatedRegistration = await readContext.Registrations
             .AsNoTracking()
-            .SingleAsync(x => x.Id == registration.Id);
+            .SingleAsync(x => x.Id == registration.Id, TestContext.Current.CancellationToken);
 
         Assert.Equal(RegistrationStatus.Confirmed, updatedRegistration.Status);
 

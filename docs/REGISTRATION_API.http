@@ -1,0 +1,82 @@
+@baseUrl = https://localhost:7217
+
+### Get all conferences
+
+GET {{baseUrl}}/api/conferences
+
+
+### Create a conference
+
+POST {{baseUrl}}/api/conferences
+Content-Type: application/json
+
+{
+  "name": "ConferenceProFlow Summit 2027",
+  "startsAtUtc": "2027-06-01T08:00:00Z",
+  "endsAtUtc": "2027-06-02T18:00:00Z"
+}
+
+
+### Get a conference by ID
+
+GET {{baseUrl}}/api/conferences/c27da0ad-de5a-49d4-97a7-74d080ff368e
+
+
+### Create a conference session
+
+POST {{baseUrl}}/api/conferences/c27da0ad-de5a-49d4-97a7-74d080ff368e/sessions
+Content-Type: application/json
+
+{
+  "title": "Building Distributed Systems with .NET",
+  "startsAtUtc": "2027-06-01T10:00:00Z",
+  "endsAtUtc": "2027-06-01T11:30:00Z"
+}
+
+
+### Get conference sessions
+
+GET {{baseUrl}}/api/conferences/835b2ad3-fe20-4eef-8a59-c9332faffb15/sessions
+
+
+### Create a participant
+
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Mark Horvat",
+  "email": "mark.horvat@example.com"
+}
+
+
+### Get participant by ID
+
+GET {{baseUrl}}/api/participants/cf1bf21e-f09c-48f3-aead-1063b1e5ce3b
+
+
+### Create a registration
+
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "cf1bf21e-f09c-48f3-aead-1063b1e5ce3b",
+  "sessionId": "835b2ad3-fe20-4eef-8a59-c9332faffb15"
+}
+
+
+### Get registration by ID
+
+GET {{baseUrl}}/api/registrations/bd19b3e0-511a-4ed8-aa98-026a69652194
+
+
+### Attempt duplicate participant
+
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Mark Horvat",
+  "email": "MARK.HORVAT@example.com"
+}
