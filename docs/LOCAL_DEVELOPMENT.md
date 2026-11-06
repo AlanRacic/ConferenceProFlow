@@ -386,3 +386,99 @@ The Registration API must not directly modify the Allocation service's database.
 This separation establishes clear data ownership and prepares the application for asynchronous communication through messaging infrastructure.
 
 The Registration API now supports HTTP-based creation and retrieval of Pending registration requests. Asynchronous allocation, Transactional Outbox processing, and allocation-result handling will be introduced in subsequent development phases.
+
+---
+
+## RabbitMQ — Local Messaging Infrastructure
+
+ConferenceProFlow uses RabbitMQ for asynchronous communication between the Registration API and the future Allocation Worker.
+
+RabbitMQ runs locally through Docker Compose using the official RabbitMQ image with the Management plugin.
+
+### Configuration
+
+The root `.env.example` file includes RabbitMQ configuration variables.
+
+Copy the example configuration when setting up the repository for the first time, then configure the following values in the local `.env` file:
+
+```dotenv
+RABBITMQ_USER=conferenceproflow
+RABBITMQ_PASSWORD=YOUR_STRONG_LOCAL_PASSWORD
+```
+
+The local `.env` file must never be committed to Git.
+
+### Start RabbitMQ
+
+Ensure Docker Desktop is running.
+
+From the repository root, execute:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml up -d rabbitmq
+```
+
+Check the container status:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml ps
+```
+
+Verify the RabbitMQ application:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml exec rabbitmq rabbitmq-diagnostics -q check_running
+```
+
+### Connection Details
+
+| Setting | Value |
+|---|---|
+| AMQP host | `127.0.0.1` |
+| AMQP port | `5672` |
+| Management UI | `http://127.0.0.1:15672` |
+| Username | Value of `RABBITMQ_USER` |
+| Password | Value of `RABBITMQ_PASSWORD` |
+| Virtual host | `conferenceproflow` |
+
+Use the configured credentials to sign in to the Management UI.
+
+### Persistence
+
+RabbitMQ data is stored in the named Docker volume `rabbitmq_data`.
+
+Normal container restarts preserve this volume.
+
+Deleting the volume removes its persisted data, including RabbitMQ definitions and stored messages.
+
+The initial credentials and virtual host are provisioned when RabbitMQ initializes an empty data directory. Changing the environment variables later does not automatically update existing users or passwords.
+
+### Stop RabbitMQ
+
+To stop only RabbitMQ:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml stop rabbitmq
+```
+
+To restart it:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml start rabbitmq
+```
+
+To stop and remove all services defined in Docker Compose while preserving named volumes:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml down
+```
+
+Do not use `down -v` unless intentionally deleting persistent development data.
+
+### Current Scope
+
+This phase introduces RabbitMQ infrastructure only.
+
+Application publishers, exchanges, queues, consumers, Transactional Outbox processing, and allocation workflows will be implemented in subsequent development tasks.
+
+The current Registration API continues to operate independently of RabbitMQ.
