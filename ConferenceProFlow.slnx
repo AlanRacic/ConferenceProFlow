@@ -5,7 +5,10 @@
     <File Path="LICENSE.txt" />
     <File Path="README.md" />
   </Folder>
+  <Project Path="src/ConferenceProFlow.Allocation.Worker/ConferenceProFlow.Allocation.Worker.csproj" Id="56070e21-9a7b-4792-a6b7-c45026b1fb07" />
   <Project Path="src/ConferenceProFlow.Registration.Api/ConferenceProFlow.Registration.Api.csproj" Id="e010bf9a-79bf-4b25-8f1f-d3660117f9b2" />
+  <Project Path="tests/ConferenceProFlow.Allocation.IntegrationTests/ConferenceProFlow.Allocation.IntegrationTests.csproj" Id="f33ce441-0d9a-4069-ba05-a5d962899eb9" />
+  <Project Path="tests/ConferenceProFlow.Allocation.UnitTests/ConferenceProFlow.Allocation.UnitTests.csproj" Id="891cfaa2-47cb-408f-85e7-98249fdd7617" />
   <Project Path="tests/ConferenceProFlow.Registration.IntegrationTests/ConferenceProFlow.Registration.IntegrationTests.csproj" Id="0e4b5d30-16ea-4090-9bee-dfdae64f3586" />
   <Project Path="tests/ConferenceProFlow.Registration.UnitTests/ConferenceProFlow.Registration.UnitTests.csproj" Id="2d577fda-bda5-4ca6-97a8-c029a6d0abb1" />
 </Solution>

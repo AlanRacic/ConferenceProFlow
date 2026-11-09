@@ -377,15 +377,19 @@ Avoid using `down -v` unless you intentionally want to delete the database volum
 
 ## Database Architecture Notes
 
-The Registration API owns the `ConferenceProFlowRegistration` database.
+ConferenceProFlow uses separate databases for the Registration and Allocation services, establishing clear data ownership and service boundaries.
 
-The future Allocation service will have its own database and will be responsible for session capacity and seat allocation.
+The Registration API owns the `ConferenceProFlowRegistration` database, which stores conferences, sessions, participants, and registration requests.
 
-The Registration API must not directly modify the Allocation service's database.
+The Allocation Worker owns the `ConferenceProFlowAllocation` database, which stores session inventory and allocation records.
 
-This separation establishes clear data ownership and prepares the application for asynchronous communication through messaging infrastructure.
+Both databases currently run on the same local SQL Server instance but maintain independent EF Core DbContexts and migrations.
 
-The Registration API now supports HTTP-based creation and retrieval of Pending registration requests. Asynchronous allocation, Transactional Outbox processing, and allocation-result handling will be introduced in subsequent development phases.
+Each service is responsible for its own data and must not directly access or modify the other service's database.
+
+The Registration API supports HTTP-based creation and retrieval of registration requests with an initial `Pending` status. The Allocation Worker currently provides the domain model and persistence infrastructure, but automated seat allocation is not yet implemented.
+
+Asynchronous communication through RabbitMQ, Transactional Outbox processing, concurrency-safe seat allocation, and allocation-result handling will be introduced in subsequent development phases.
 
 ---
 
@@ -482,3 +486,209 @@ This phase introduces RabbitMQ infrastructure only.
 Application publishers, exchanges, queues, consumers, Transactional Outbox processing, and allocation workflows will be implemented in subsequent development tasks.
 
 The current Registration API continues to operate independently of RabbitMQ.
+
+---
+
+## Allocation Worker — Local Development
+
+The Allocation Worker is a standalone .NET 10 Worker Service designed to manage session capacity and allocation processing.
+
+The project is located at:
+
+`src/ConferenceProFlow.Allocation.Worker`
+
+### Current Implementation
+
+The Allocation Worker includes:
+
+- .NET Generic Host configuration.
+- Dependency injection and structured logging.
+- A hosted BackgroundService with cancellation-aware shutdown.
+- Allocation domain entities.
+- Entity Framework Core 10 with SQL Server.
+- A dedicated Allocation database.
+- Version-controlled EF Core migrations.
+- Unit and SQL Server integration tests.
+
+RabbitMQ message consumption and transactionally safe seat allocation are not yet implemented.
+
+### Configure the Allocation Database
+
+The Allocation Worker uses a separate SQL Server database:
+
+`ConferenceProFlowAllocation`
+
+The database runs on the existing local SQL Server 2022 instance managed through Docker Compose.
+
+The Worker reads its connection string from:
+
+`ConnectionStrings:AllocationDb`
+
+For local development, configure the connection string using ASP.NET Core User Secrets.
+
+In Visual Studio, right-click `ConferenceProFlow.Allocation.Worker` and select **Manage User Secrets**.
+
+Use the following configuration, replacing the placeholder password with the password configured in the local `.env` file:
+
+```json
+{
+  "ConnectionStrings": {
+    "AllocationDb": "Server=127.0.0.1,14333;Database=ConferenceProFlowAllocation;User Id=sa;Password=YOUR_LOCAL_PASSWORD;Encrypt=True;TrustServerCertificate=True;"
+  }
+}
+```
+
+Never commit actual credentials to the repository.
+
+### Apply Database Migrations
+
+Start the development SQL Server:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml up -d sqlserver
+```
+
+Restore the local EF Core CLI tool:
+
+```powershell
+dotnet tool restore
+```
+
+Apply the existing Allocation migrations:
+
+```powershell
+dotnet ef database update --project src/ConferenceProFlow.Allocation.Worker --startup-project src/ConferenceProFlow.Allocation.Worker --context AllocationDbContext
+```
+
+The initial migration creates:
+
+- `SessionInventories`
+- `Allocations`
+- `__EFMigrationsHistory`
+
+The database schema is maintained through EF Core migrations.
+
+Do not create the business tables manually.
+
+### Run the Allocation Worker
+
+The Worker requires the `AllocationDb` connection string to be configured at startup.
+
+From the repository root, execute:
+
+```powershell
+dotnet run --project src/ConferenceProFlow.Allocation.Worker/ConferenceProFlow.Allocation.Worker.csproj
+```
+
+Alternatively, set `ConferenceProFlow.Allocation.Worker` as the startup project in Visual Studio and press `F5`.
+
+The current BackgroundService does not execute allocation database operations or consume RabbitMQ messages.
+
+SQL Server does not need to be running merely for the current background loop to start, although it must be available for database operations, migrations, and the future allocation workflow.
+
+### Stop the Worker
+
+Press `Ctrl + C` when running from a terminal, or stop the Visual Studio debugging session.
+
+The BackgroundService handles cancellation and supports graceful shutdown.
+
+### Service Ownership
+
+The Allocation Worker owns the `ConferenceProFlowAllocation` database.
+
+The Registration API owns the separate `ConferenceProFlowRegistration` database.
+
+Neither service should directly modify the other service's database.
+
+Future service communication will use asynchronous messaging.
+
+### Current Limitations
+
+The Allocation domain and persistence foundations are implemented, but business allocation processing is not yet operational.
+
+Upcoming development includes:
+
+- Session inventory provisioning.
+- Transactional Outbox.
+- RabbitMQ message publishing and consumption.
+- Concurrency-safe capacity allocation.
+- Idempotent message processing.
+- Allocation-result handling.
+
+---
+
+## Allocation Worker — Automated Testing
+
+The Allocation Worker has separate unit and integration test projects.
+
+### Unit Tests
+
+The project is located at:
+
+`tests/ConferenceProFlow.Allocation.UnitTests`
+
+Unit tests validate the Allocation domain model without external infrastructure.
+
+The tests cover:
+
+- Session inventory creation and validation.
+- Positive capacity requirements.
+- Initial reserved seat count.
+- UTC timestamp validation.
+- Confirmed and Rejected allocation creation.
+- Rejection reason validation.
+- Required identifiers.
+
+Run the unit tests from the repository root:
+
+```powershell
+dotnet test tests/ConferenceProFlow.Allocation.UnitTests/ConferenceProFlow.Allocation.UnitTests.csproj --configuration Release
+```
+
+### SQL Server Integration Tests
+
+The integration test project is located at:
+
+`tests/ConferenceProFlow.Allocation.IntegrationTests`
+
+Integration tests use xUnit v3, Entity Framework Core, and Testcontainers for .NET.
+
+Testcontainers starts an isolated SQL Server instance and applies the Allocation service's EF Core migrations.
+
+The tests validate:
+
+- Session inventory persistence.
+- Allocation persistence.
+- Unique registration constraints.
+- Foreign key enforcement.
+- SQL Server CHECK constraints.
+- RowVersion generation.
+- Optimistic concurrency conflict detection.
+
+Run the integration tests:
+
+```powershell
+dotnet test tests/ConferenceProFlow.Allocation.IntegrationTests/ConferenceProFlow.Allocation.IntegrationTests.csproj --configuration Release
+```
+
+Docker Desktop must be running before executing the integration tests.
+
+The Allocation integration tests do not use or modify the local development database.
+
+### Run All Tests
+
+From the repository root:
+
+```powershell
+dotnet test ConferenceProFlow.slnx --configuration Release
+```
+
+The solution contains independent Registration and Allocation test suites.
+
+GitHub Actions executes the automated tests as part of the existing CI workflow.
+
+### Current Testing Scope
+
+The Allocation tests validate the existing domain and persistence foundations.
+
+Concurrency-safe seat allocation, transaction coordination, message idempotency, RabbitMQ processing, and failure recovery will be tested as those capabilities are implemented in subsequent development phases.
