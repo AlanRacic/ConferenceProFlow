@@ -482,3 +482,73 @@ This phase introduces RabbitMQ infrastructure only.
 Application publishers, exchanges, queues, consumers, Transactional Outbox processing, and allocation workflows will be implemented in subsequent development tasks.
 
 The current Registration API continues to operate independently of RabbitMQ.
+
+---
+
+## Allocation Worker — Local Development
+
+The Allocation Worker is a standalone .NET 10 Worker Service responsible for the future processing of session capacity and seat allocation requests.
+
+The project is located at:
+
+`src/ConferenceProFlow.Allocation.Worker`
+
+### Current Implementation
+
+The initial Worker Service includes:
+
+- .NET Generic Host configuration.
+- Dependency injection.
+- Structured logging.
+- A hosted BackgroundService.
+- Cancellation-aware application shutdown.
+
+The Worker currently provides application lifecycle functionality only.
+
+RabbitMQ consumption, allocation persistence, and seat reservation processing are not yet implemented.
+
+### Run the Allocation Worker
+
+From the repository root, execute:
+
+```powershell
+dotnet run --project src/ConferenceProFlow.Allocation.Worker/ConferenceProFlow.Allocation.Worker.csproj
+```
+
+Alternatively, open `ConferenceProFlow.slnx` in Visual Studio, select `ConferenceProFlow.Allocation.Worker` as the startup project, and press `F5`.
+
+The Worker runs as a background application and does not expose HTTP endpoints.
+
+### Stop the Worker
+
+When running from a terminal, press `Ctrl + C` to request graceful shutdown.
+
+When running through Visual Studio debugging, stop the debugging session.
+
+The BackgroundService handles cancellation and terminates without treating normal shutdown as an application failure.
+
+### Infrastructure Dependencies
+
+The initial Worker Service does not require SQL Server or RabbitMQ to be running.
+
+These dependencies will be introduced incrementally as the Allocation domain, persistence infrastructure, and messaging consumers are implemented.
+
+### Service Ownership
+
+The Allocation Worker will own a separate Allocation database.
+
+It must not directly access or modify the Registration service's database.
+
+Future communication between the two services will use asynchronous messaging.
+
+### Next Development Steps
+
+Upcoming implementation tasks include:
+
+- Allocation domain entities.
+- Independent SQL Server persistence.
+- EF Core migrations.
+- Allocation unit and integration tests.
+- RabbitMQ consumers.
+- Concurrency-safe seat allocation.
+- Idempotent message processing.
