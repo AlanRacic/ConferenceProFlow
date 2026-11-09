@@ -377,15 +377,19 @@ Avoid using `down -v` unless you intentionally want to delete the database volum
 
 ## Database Architecture Notes
 
-The Registration API owns the `ConferenceProFlowRegistration` database.
+ConferenceProFlow uses separate databases for the Registration and Allocation services, establishing clear data ownership and service boundaries.
 
-The future Allocation service will have its own database and will be responsible for session capacity and seat allocation.
+The Registration API owns the `ConferenceProFlowRegistration` database, which stores conferences, sessions, participants, and registration requests.
 
-The Registration API must not directly modify the Allocation service's database.
+The Allocation Worker owns the `ConferenceProFlowAllocation` database, which stores session inventory and allocation records.
 
-This separation establishes clear data ownership and prepares the application for asynchronous communication through messaging infrastructure.
+Both databases currently run on the same local SQL Server instance but maintain independent EF Core DbContexts and migrations.
 
-The Registration API now supports HTTP-based creation and retrieval of Pending registration requests. Asynchronous allocation, Transactional Outbox processing, and allocation-result handling will be introduced in subsequent development phases.
+Each service is responsible for its own data and must not directly access or modify the other service's database.
+
+The Registration API supports HTTP-based creation and retrieval of registration requests with an initial `Pending` status. The Allocation Worker currently provides the domain model and persistence infrastructure, but automated seat allocation is not yet implemented.
+
+Asynchronous communication through RabbitMQ, Transactional Outbox processing, concurrency-safe seat allocation, and allocation-result handling will be introduced in subsequent development phases.
 
 ---
 
@@ -487,7 +491,7 @@ The current Registration API continues to operate independently of RabbitMQ.
 
 ## Allocation Worker — Local Development
 
-The Allocation Worker is a standalone .NET 10 Worker Service responsible for the future processing of session capacity and seat allocation requests.
+The Allocation Worker is a standalone .NET 10 Worker Service designed to manage session capacity and allocation processing.
 
 The project is located at:
 
@@ -495,19 +499,80 @@ The project is located at:
 
 ### Current Implementation
 
-The initial Worker Service includes:
+The Allocation Worker includes:
 
 - .NET Generic Host configuration.
-- Dependency injection.
-- Structured logging.
-- A hosted BackgroundService.
-- Cancellation-aware application shutdown.
+- Dependency injection and structured logging.
+- A hosted BackgroundService with cancellation-aware shutdown.
+- Allocation domain entities.
+- Entity Framework Core 10 with SQL Server.
+- A dedicated Allocation database.
+- Version-controlled EF Core migrations.
+- Unit and SQL Server integration tests.
 
-The Worker currently provides application lifecycle functionality only.
+RabbitMQ message consumption and transactionally safe seat allocation are not yet implemented.
 
-RabbitMQ consumption, allocation persistence, and seat reservation processing are not yet implemented.
+### Configure the Allocation Database
+
+The Allocation Worker uses a separate SQL Server database:
+
+`ConferenceProFlowAllocation`
+
+The database runs on the existing local SQL Server 2022 instance managed through Docker Compose.
+
+The Worker reads its connection string from:
+
+`ConnectionStrings:AllocationDb`
+
+For local development, configure the connection string using ASP.NET Core User Secrets.
+
+In Visual Studio, right-click `ConferenceProFlow.Allocation.Worker` and select **Manage User Secrets**.
+
+Use the following configuration, replacing the placeholder password with the password configured in the local `.env` file:
+
+```json
+{
+  "ConnectionStrings": {
+    "AllocationDb": "Server=127.0.0.1,14333;Database=ConferenceProFlowAllocation;User Id=sa;Password=YOUR_LOCAL_PASSWORD;Encrypt=True;TrustServerCertificate=True;"
+  }
+}
+```
+
+Never commit actual credentials to the repository.
+
+### Apply Database Migrations
+
+Start the development SQL Server:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml up -d sqlserver
+```
+
+Restore the local EF Core CLI tool:
+
+```powershell
+dotnet tool restore
+```
+
+Apply the existing Allocation migrations:
+
+```powershell
+dotnet ef database update --project src/ConferenceProFlow.Allocation.Worker --startup-project src/ConferenceProFlow.Allocation.Worker --context AllocationDbContext
+```
+
+The initial migration creates:
+
+- `SessionInventories`
+- `Allocations`
+- `__EFMigrationsHistory`
+
+The database schema is maintained through EF Core migrations.
+
+Do not create the business tables manually.
 
 ### Run the Allocation Worker
+
+The Worker requires the `AllocationDb` connection string to be configured at startup.
 
 From the repository root, execute:
 
@@ -515,43 +580,40 @@ From the repository root, execute:
 dotnet run --project src/ConferenceProFlow.Allocation.Worker/ConferenceProFlow.Allocation.Worker.csproj
 ```
 
-Alternatively, open `ConferenceProFlow.slnx` in Visual Studio, select `ConferenceProFlow.Allocation.Worker` as the startup project, and press `F5`.
+Alternatively, set `ConferenceProFlow.Allocation.Worker` as the startup project in Visual Studio and press `F5`.
 
-The Worker runs as a background application and does not expose HTTP endpoints.
+The current BackgroundService does not execute allocation database operations or consume RabbitMQ messages.
+
+SQL Server does not need to be running merely for the current background loop to start, although it must be available for database operations, migrations, and the future allocation workflow.
 
 ### Stop the Worker
 
-When running from a terminal, press `Ctrl + C` to request graceful shutdown.
+Press `Ctrl + C` when running from a terminal, or stop the Visual Studio debugging session.
 
-When running through Visual Studio debugging, stop the debugging session.
-
-The BackgroundService handles cancellation and terminates without treating normal shutdown as an application failure.
-
-### Infrastructure Dependencies
-
-The initial Worker Service does not require SQL Server or RabbitMQ to be running.
-
-These dependencies will be introduced incrementally as the Allocation domain, persistence infrastructure, and messaging consumers are implemented.
+The BackgroundService handles cancellation and supports graceful shutdown.
 
 ### Service Ownership
 
-The Allocation Worker will own a separate Allocation database.
+The Allocation Worker owns the `ConferenceProFlowAllocation` database.
 
-It must not directly access or modify the Registration service's database.
+The Registration API owns the separate `ConferenceProFlowRegistration` database.
 
-Future communication between the two services will use asynchronous messaging.
+Neither service should directly modify the other service's database.
 
-### Next Development Steps
+Future service communication will use asynchronous messaging.
 
-Upcoming implementation tasks include:
+### Current Limitations
 
-- Allocation domain entities.
-- Independent SQL Server persistence.
-- EF Core migrations.
-- Allocation unit and integration tests.
-- RabbitMQ consumers.
-- Concurrency-safe seat allocation.
+The Allocation domain and persistence foundations are implemented, but business allocation processing is not yet operational.
+
+Upcoming development includes:
+
+- Session inventory provisioning.
+- Transactional Outbox.
+- RabbitMQ message publishing and consumption.
+- Concurrency-safe capacity allocation.
 - Idempotent message processing.
+- Allocation-result handling.
 
 ---
 

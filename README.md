@@ -67,7 +67,7 @@ Additional architecture documentation, ADRs, development guides, and performance
 
 ## Project Status
 
-**Phase 1 — Core Registration API**
+**M1 — Core Registration API: Completed | M2 — Messaging & Allocation: In Progress**
 
 The initial Registration API has been implemented and validated through automated testing.
 
@@ -110,6 +110,31 @@ Example HTTP requests are available in [`docs/REGISTRATION_API.http`](docs/REGIS
 
 Local setup and testing instructions are available in the [Local Development Guide](docs/LOCAL_DEVELOPMENT.md).
 
+### Allocation Worker Foundation
+
+The initial Allocation Worker foundation has been implemented as part of M2 — Messaging & Allocation.
+
+Implemented components include:
+
+- A standalone .NET 10 Worker Service using the Generic Host.
+- BackgroundService lifecycle management and graceful shutdown.
+- An independent Allocation domain model.
+- Session inventory and allocation result entities.
+- A dedicated `ConferenceProFlowAllocation` SQL Server database.
+- Entity Framework Core persistence and version-controlled migrations.
+- SQL Server constraints protecting inventory and allocation data.
+- RowVersion-based optimistic concurrency support.
+- Allocation domain unit tests.
+- SQL Server persistence integration tests using Testcontainers.
+- Local RabbitMQ infrastructure using Docker Compose.
+- RabbitMQ Management UI and persistent storage configuration.
+
+The Registration and Allocation services maintain separate database ownership.
+
+The Allocation Worker does not yet consume RabbitMQ messages or perform seat allocation.
+
+Transactional message processing, concurrency-safe allocation, and allocation-result handling will be introduced in subsequent development phases.
+
 ### Planned Development
 
 Upcoming development phases will introduce:
@@ -119,7 +144,6 @@ Upcoming development phases will introduce:
 - Registration request idempotency.
 - RabbitMQ-based asynchronous messaging.
 - Transactional Outbox and reliable message publishing.
-- An independent Allocation Worker with its own database.
 - Concurrency-safe capacity allocation.
 - Idempotent message processing and registration status updates.
 - Kafka-based event streaming and analytics.
