@@ -552,3 +552,81 @@ Upcoming implementation tasks include:
 - RabbitMQ consumers.
 - Concurrency-safe seat allocation.
 - Idempotent message processing.
+
+---
+
+## Allocation Worker — Automated Testing
+
+The Allocation Worker has separate unit and integration test projects.
+
+### Unit Tests
+
+The project is located at:
+
+`tests/ConferenceProFlow.Allocation.UnitTests`
+
+Unit tests validate the Allocation domain model without external infrastructure.
+
+The tests cover:
+
+- Session inventory creation and validation.
+- Positive capacity requirements.
+- Initial reserved seat count.
+- UTC timestamp validation.
+- Confirmed and Rejected allocation creation.
+- Rejection reason validation.
+- Required identifiers.
+
+Run the unit tests from the repository root:
+
+```powershell
+dotnet test tests/ConferenceProFlow.Allocation.UnitTests/ConferenceProFlow.Allocation.UnitTests.csproj --configuration Release
+```
+
+### SQL Server Integration Tests
+
+The integration test project is located at:
+
+`tests/ConferenceProFlow.Allocation.IntegrationTests`
+
+Integration tests use xUnit v3, Entity Framework Core, and Testcontainers for .NET.
+
+Testcontainers starts an isolated SQL Server instance and applies the Allocation service's EF Core migrations.
+
+The tests validate:
+
+- Session inventory persistence.
+- Allocation persistence.
+- Unique registration constraints.
+- Foreign key enforcement.
+- SQL Server CHECK constraints.
+- RowVersion generation.
+- Optimistic concurrency conflict detection.
+
+Run the integration tests:
+
+```powershell
+dotnet test tests/ConferenceProFlow.Allocation.IntegrationTests/ConferenceProFlow.Allocation.IntegrationTests.csproj --configuration Release
+```
+
+Docker Desktop must be running before executing the integration tests.
+
+The Allocation integration tests do not use or modify the local development database.
+
+### Run All Tests
+
+From the repository root:
+
+```powershell
+dotnet test ConferenceProFlow.slnx --configuration Release
+```
+
+The solution contains independent Registration and Allocation test suites.
+
+GitHub Actions executes the automated tests as part of the existing CI workflow.
+
+### Current Testing Scope
+
+The Allocation tests validate the existing domain and persistence foundations.
+
+Concurrency-safe seat allocation, transaction coordination, message idempotency, RabbitMQ processing, and failure recovery will be tested as those capabilities are implemented in subsequent development phases.
