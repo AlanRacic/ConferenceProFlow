@@ -1,4 +1,5 @@
 ﻿using ConferenceProFlow.Registration.Api.Domain.Entities;
+using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using Microsoft.EntityFrameworkCore;
 using RegistrationEntity = ConferenceProFlow.Registration.Api.Domain.Entities.Registration;
 
@@ -18,6 +19,8 @@ public sealed class RegistrationDbContext : DbContext
 
     public DbSet<RegistrationEntity> Registrations => Set<RegistrationEntity>();
 
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -26,6 +29,7 @@ public sealed class RegistrationDbContext : DbContext
         ConfigureConferenceSessions(modelBuilder);
         ConfigureParticipants(modelBuilder);
         ConfigureRegistrations(modelBuilder);
+        ConfigureOutboxMessages(modelBuilder);
     }
 
     private static void ConfigureConferences(ModelBuilder modelBuilder)
@@ -141,6 +145,48 @@ public sealed class RegistrationDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(x => x.SessionId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+
+    private static void ConfigureOutboxMessages(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<OutboxMessage>(entity =>
+        {
+            entity.ToTable("OutboxMessages", table =>
+            {
+                table.HasCheckConstraint("CK_OutboxMessages_PublishAttempts", "[PublishAttempts] >= 0");
+            });
+
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Id)
+                .ValueGeneratedNever();
+
+            entity.Property(x => x.MessageType)
+                .HasMaxLength(160)
+                .IsRequired();
+
+            entity.Property(x => x.Payload)
+                .HasColumnType("nvarchar(max)")
+                .IsRequired();
+
+            entity.Property(x => x.OccurredAtUtc)
+                .IsRequired();
+
+            entity.Property(x => x.PublishedAtUtc);
+
+            entity.Property(x => x.PublishAttempts)
+                .IsRequired();
+
+            entity.Property(x => x.LastError)
+                .HasMaxLength(2000);
+
+            entity.HasIndex(x => new
+            {
+                x.PublishedAtUtc,
+                x.OccurredAtUtc
+            })
+            .HasDatabaseName("IX_OutboxMessages_PublishStatus");
         });
     }
 }
