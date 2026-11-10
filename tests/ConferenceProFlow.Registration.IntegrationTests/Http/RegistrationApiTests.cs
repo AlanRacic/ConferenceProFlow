@@ -1,5 +1,7 @@
 ﻿using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
+using ConferenceProFlow.Registration.Api.Features.Registrations.Messages;
 using ConferenceProFlow.Registration.Api.Domain.Enums;
 using ConferenceProFlow.Registration.Api.Features.Conferences;
 using ConferenceProFlow.Registration.Api.Features.Participants;
@@ -216,6 +218,78 @@ public sealed class RegistrationApiTests : IDisposable
             .SingleAsync(r => r.Id == registration.Id, TestContext.Current.CancellationToken);
 
         Assert.Equal(RegistrationStatus.Pending, stored.Status);
+    }
+
+    [Fact]
+    public async Task CreateRegistration_PersistsMatchingUnpublishedOutboxMessage()
+    {
+        // Arrange
+        var conference = await CreateConferenceAsync();
+        var session = await CreateSessionAsync(conference.Id);
+        var participant = await CreateParticipantAsync();
+
+        var request = new CreateRegistrationRequest(participant.Id, session.Id);
+
+        // Act
+        using var response = await _client.PostAsJsonAsync(
+            "/api/registrations",
+            request,
+            TestContext.Current.CancellationToken);
+
+        // Assert HTTP response.
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+
+        var registration = await response.Content
+            .ReadFromJsonAsync<RegistrationResponse>(TestContext.Current.CancellationToken);
+
+        Assert.NotNull(registration);
+        Assert.Equal("Pending", registration.Status);
+
+        // Read persisted Outbox messages from the test database.
+        await using var db = _fixture.CreateDbContext();
+
+        var outboxMessages = await db.OutboxMessages
+            .AsNoTracking()
+            .Where(x => x.MessageType == RegistrationRequestedV1.MessageType)
+            .ToListAsync(TestContext.Current.CancellationToken);
+
+        // Find the event related to the created registration.
+        var matchingMessages = outboxMessages
+            .Select(message => new
+            {
+                Outbox = message,
+                Event = JsonSerializer.Deserialize<RegistrationRequestedV1>(
+                    message.Payload,
+                    JsonSerializerOptions.Web)
+            })
+            .Where(x => x.Event?.RegistrationId == registration.Id)
+            .ToList();
+
+        var matching = Assert.Single(matchingMessages);
+
+        Assert.NotNull(matching.Event);
+
+        // Verify message identity and business data.
+        Assert.Equal(
+            matching.Outbox.Id,
+            matching.Event.MessageId);
+
+        Assert.Equal(
+            registration.Id,
+            matching.Event.RegistrationId);
+
+        Assert.Equal(
+            session.Id,
+            matching.Event.SessionId);
+
+        Assert.Equal(
+            matching.Outbox.OccurredAtUtc,
+            matching.Event.OccurredAtUtc);
+
+        // Verify that publishing has not happened yet.
+        Assert.Null(matching.Outbox.PublishedAtUtc);
+        Assert.Equal(0, matching.Outbox.PublishAttempts);
+        Assert.Null(matching.Outbox.LastError);
     }
 
     [Fact]

@@ -1,6 +1,8 @@
 ﻿using ConferenceProFlow.Registration.Api.Domain.Entities;
 using ConferenceProFlow.Registration.Api.Domain.Enums;
 using ConferenceProFlow.Registration.IntegrationTests.Infrastructure;
+using ConferenceProFlow.Registration.Api.Features.Registrations.Messages;
+using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using Microsoft.EntityFrameworkCore;
 using RegistrationEntity = ConferenceProFlow.Registration.Api.Domain.Entities.Registration;
 
@@ -125,6 +127,75 @@ public sealed class RegistrationPersistenceTests
         Assert.Equal(RegistrationStatus.Confirmed, updatedRegistration.Status);
 
         Assert.Equal(confirmedAt, updatedRegistration.UpdatedAtUtc);
+    }
+
+    [Fact]
+    public async Task SaveRegistration_WhenOutboxInsertFails_DoesNotCommitRegistration()
+    {
+        // Arrange
+        var (participantId, sessionId) = await CreatePrerequisitesAsync();
+
+        var existingMessageId = Guid.NewGuid();
+
+        // Create an existing Outbox record.
+        await using (var setupDb = _fixture.CreateDbContext())
+        {
+            var existingMessage = OutboxMessage.Create(
+                existingMessageId,
+                RegistrationRequestedV1.MessageType,
+                "{}",
+                CreatedAt);
+
+            setupDb.OutboxMessages.Add(existingMessage);
+
+            await setupDb.SaveChangesAsync(
+                TestContext.Current.CancellationToken);
+        }
+
+        // Create a new registration and an Outbox record
+        // that intentionally violates the Outbox primary key.
+        var registration = RegistrationEntity.Create(
+            participantId,
+            sessionId,
+            CreatedAt);
+
+        var duplicateOutboxMessage = OutboxMessage.Create(
+            existingMessageId,
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            CreatedAt);
+
+        await using (var failingDb = _fixture.CreateDbContext())
+        {
+            failingDb.Registrations.Add(registration);
+            failingDb.OutboxMessages.Add(duplicateOutboxMessage);
+
+            // Act & Assert
+            await Assert.ThrowsAsync<DbUpdateException>(async () =>
+            {
+                await failingDb.SaveChangesAsync(
+                    TestContext.Current.CancellationToken);
+            });
+        }
+
+        // Verify using a completely new DbContext.
+        await using var verificationDb = _fixture.CreateDbContext();
+
+        var registrationExists = await verificationDb.Registrations
+            .AsNoTracking()
+            .AnyAsync(
+                x => x.Id == registration.Id,
+                TestContext.Current.CancellationToken);
+
+        Assert.False(registrationExists);
+
+        var outboxCount = await verificationDb.OutboxMessages
+            .AsNoTracking()
+            .CountAsync(
+                x => x.Id == existingMessageId,
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, outboxCount);
     }
 
     private async Task<(Guid ParticipantId, Guid SessionId)>CreatePrerequisitesAsync()
