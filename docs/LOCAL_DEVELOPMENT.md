@@ -692,3 +692,52 @@ GitHub Actions executes the automated tests as part of the existing CI workflow.
 The Allocation tests validate the existing domain and persistence foundations.
 
 Concurrency-safe seat allocation, transaction coordination, message idempotency, RabbitMQ processing, and failure recovery will be tested as those capabilities are implemented in subsequent development phases.
+
+---
+
+## RabbitMQ Outbox Integration Tests
+
+The Registration integration test suite includes automated RabbitMQ Outbox Publisher tests.
+
+The tests use:
+
+- xUnit v3.
+- SQL Server Testcontainers.
+- RabbitMQ Testcontainers.
+- The actual `OutboxPublisherService` implementation.
+- Isolated test databases.
+- RabbitMQ .NET Client for message verification.
+
+### Test Scenarios
+
+The initial tests verify:
+
+1. Successful publishing of an Outbox message to RabbitMQ.
+2. Persistence of the confirmed publication state in SQL Server.
+3. Verification of message identity, routing, and JSON payload.
+4. Preservation of unpublished messages when RabbitMQ is unavailable.
+5. Recovery and successful publishing after restarting the publisher with a working connection.
+
+### Run RabbitMQ Tests
+
+Start Docker Desktop.
+
+From the repository root, execute:
+
+```powershell
+dotnet test tests/ConferenceProFlow.Registration.IntegrationTests/ConferenceProFlow.Registration.IntegrationTests.csproj --configuration Release --filter "FullyQualifiedName~OutboxPublisherIntegrationTests"
+```
+
+Testcontainers starts the required infrastructure automatically.
+
+The tests do not use the development RabbitMQ broker or the local development databases.
+
+### Reliability Guarantees
+
+The tests verify the initial Outbox publishing and recovery behavior.
+
+They do not establish exactly-once message delivery.
+
+Duplicate publication, unroutable messages, ambiguous publisher confirmations, and additional failure scenarios will be addressed in subsequent reliability tests.
+
+The current publisher supports a single active instance and requires additional coordination before horizontal scaling.
