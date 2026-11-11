@@ -145,11 +145,11 @@ public sealed class OutboxMessageTests
             "{}",
             DateTimeOffset.UtcNow);
 
-        message.RecordFailure("RabbitMQ unavailable.");
+        message.RecordFailure("RabbitMQ unavailable", DateTimeOffset.UtcNow);
 
         Assert.Equal(1, message.PublishAttempts);
         Assert.Null(message.PublishedAtUtc);
-        Assert.Equal("RabbitMQ unavailable.", message.LastError);
+        Assert.Equal("RabbitMQ unavailable", message.LastError);
     }
 
     [Fact]
@@ -163,7 +163,7 @@ public sealed class OutboxMessageTests
             "{}",
             occurredAt);
 
-        message.RecordFailure("Connection failed.");
+        message.RecordFailure("RabbitMQ unavailable", DateTimeOffset.UtcNow);
 
         message.MarkPublished(occurredAt.AddSeconds(5));
 
@@ -187,5 +187,69 @@ public sealed class OutboxMessageTests
 
         Assert.Throws<InvalidOperationException>(() =>
             message.MarkPublished(occurredAt.AddSeconds(2)));
+    }
+
+    [Fact]
+    public void RecordFailure_SchedulesNextAttempt()
+    {
+        // Arrange
+        var occurredAtUtc = new DateTimeOffset(
+            2026, 11, 11, 10, 0, 0,
+            TimeSpan.Zero);
+
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            occurredAtUtc);
+
+        var firstFailureAtUtc = occurredAtUtc.AddMinutes(1);
+
+        // Act
+        message.RecordFailure("RabbitMQ unavailable", firstFailureAtUtc);
+
+        // Assert
+        Assert.Equal(1, message.PublishAttempts);
+
+        Assert.Equal(
+            firstFailureAtUtc.AddSeconds(10),
+            message.NextAttemptAtUtc);
+
+        Assert.Null(message.PublishedAtUtc);
+
+        Assert.Equal("RabbitMQ unavailable", message.LastError);
+    }
+
+    [Fact]
+    public void MarkPublished_ClearsScheduledRetry()
+    {
+        // Arrange
+        var occurredAtUtc = new DateTimeOffset(
+            2026, 11, 11, 10, 0, 0,
+            TimeSpan.Zero);
+
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            occurredAtUtc);
+
+        var failureAtUtc = occurredAtUtc.AddMinutes(1);
+
+        message.RecordFailure("Temporary broker failure", failureAtUtc);
+
+        Assert.NotNull(message.NextAttemptAtUtc);
+
+        // Act
+        message.MarkPublished(failureAtUtc.AddMinutes(1));
+
+        // Assert
+        Assert.NotNull(message.PublishedAtUtc);
+
+        Assert.Null(message.NextAttemptAtUtc);
+
+        Assert.Null(message.LastError);
+
+        Assert.Equal(2, message.PublishAttempts);
     }
 }

@@ -578,4 +578,77 @@ public sealed class OutboxPublisherIntegrationTests : IAsyncLifetime
             await publisher.StopAsync(CancellationToken.None);
         }
     }
+
+    [Fact]
+    public async Task DeferredMessage_DoesNotBlockReadyMessage()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var deferredEvent = await CreateOutboxMessageAsync();
+
+        // Simulate an Outbox message with repeated failed publishing attempts.
+        await using (var db = CreateDbContext())
+        {
+            var deferredMessage = await db.OutboxMessages.SingleAsync(
+                    x => x.Id == deferredEvent.MessageId,
+                    cancellationToken);
+
+            var failedAtUtc = DateTimeOffset.UtcNow;
+
+            for (var attempt = 0; attempt < 7; attempt++)
+            {
+                deferredMessage.RecordFailure("Simulated temporary broker failure", failedAtUtc);
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        // Create a new message that is immediately eligible.
+        var readyEvent = await CreateOutboxMessageAsync();
+
+        var rabbitMqUri = _rabbitMqFixture.ConnectionUri;
+
+        await using var provider = CreatePublisherProvider(rabbitMqUri.Port);
+
+        var publisher = provider.GetRequiredService<IHostedService>();
+
+        // Act
+        await publisher.StartAsync(cancellationToken);
+
+        try
+        {
+            var publishedMessage = await WaitForOutboxStateAsync(
+                readyEvent.MessageId,
+                message => message.PublishedAtUtc is not null);
+
+            // Assert: The ready message was published.
+            Assert.NotNull(publishedMessage.PublishedAtUtc);
+
+            Assert.Equal(1, publishedMessage.PublishAttempts);
+
+            // Assert: The deferred message was not retried.
+            await using var db = CreateDbContext();
+
+            var deferredMessage = await db.OutboxMessages
+                .AsNoTracking()
+                .SingleAsync(
+                    x => x.Id == deferredEvent.MessageId,
+                    cancellationToken);
+
+            Assert.Null(deferredMessage.PublishedAtUtc);
+
+            Assert.Equal(7, deferredMessage.PublishAttempts);
+
+            Assert.NotNull(deferredMessage.NextAttemptAtUtc);
+
+            Assert.True(
+                deferredMessage.NextAttemptAtUtc >
+                DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            await publisher.StopAsync(CancellationToken.None);
+        }
+    }
 }
