@@ -2,6 +2,7 @@ using ConferenceProFlow.Registration.Api.Features.Participants;
 using ConferenceProFlow.Registration.Api.Features.Registrations;
 using ConferenceProFlow.Registration.Api.Features.Conferences;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
+using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -24,6 +25,11 @@ builder.Services.AddDbContext<RegistrationDbContext>(
 
         options.UseSqlServer(connectionString);
     });
+
+if (builder.Configuration.GetValue<bool>("OutboxPublisher:Enabled"))
+{
+    builder.Services.AddHostedService<OutboxPublisherService>();
+}
 
 var app = builder.Build();
 

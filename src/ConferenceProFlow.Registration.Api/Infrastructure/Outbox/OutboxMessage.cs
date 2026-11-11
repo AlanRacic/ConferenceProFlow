@@ -65,4 +65,49 @@ public sealed class OutboxMessage
             LastError = null
         };
     }
+
+    public void MarkPublished(DateTimeOffset publishedAtUtc)
+    {
+        if (publishedAtUtc == default || publishedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("PublishedAtUtc must be a valid UTC timestamp.", nameof(publishedAtUtc));
+        }
+
+        if (PublishedAtUtc is not null)
+        {
+            throw new InvalidOperationException("Outbox message has already been published.");
+        }
+
+        if (publishedAtUtc < OccurredAtUtc)
+        {
+            throw new ArgumentException("PublishedAtUtc cannot precede OccurredAtUtc.", nameof(publishedAtUtc));
+        }
+
+        PublishAttempts++;
+        PublishedAtUtc = publishedAtUtc;
+        LastError = null;
+    }
+
+    public void RecordFailure(string error)
+    {
+        if (PublishedAtUtc is not null)
+        {
+            throw new InvalidOperationException("Cannot record a publishing failure for a published message.");
+        }
+
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            throw new ArgumentException("Error description is required.", nameof(error));
+        }
+
+        var normalizedError = error.Trim();
+
+        if (normalizedError.Length > 2000)
+        {
+            normalizedError = normalizedError[..2000];
+        }
+
+        PublishAttempts++;
+        LastError = normalizedError;
+    }
 }
