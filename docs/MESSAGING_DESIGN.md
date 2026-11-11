@@ -145,8 +145,6 @@ The initial planned topology is:
 
 These names define the intended topology.
 
-The required exchange, queue, bindings, and publisher configuration will be implemented in later development tasks.
-
 Publisher confirmations, persistent messages, durable queues, and routing-failure handling will be considered together.
 
 ## 8. Eventual Consistency
@@ -161,22 +159,45 @@ The final registration status will be updated after an allocation result is rece
 
 The system must tolerate temporary service unavailability, retries, and duplicate deliveries.
 
-## 9. Current Limitations
+## 9. Current Implementation and Limitations
 
-The initial messaging contract and Outbox model are being introduced incrementally.
+The Registration service implements Transactional Outbox persistence and an initial RabbitMQ Outbox Publisher.
 
-The following capabilities are not yet operational:
+### Implemented
 
-- Registration and Outbox atomic persistence.
-- Outbox database schema.
-- RabbitMQ publishing.
-- RabbitMQ consumption.
-- Automatic session inventory provisioning.
-- Concurrency-safe seat allocation.
-- Idempotent message processing.
-- Allocation-result handling.
+- Atomic persistence of registration requests and corresponding Outbox messages.
+- Versioned `RegistrationRequestedV1` integration events.
+- JSON serialization of outgoing messages.
+- SQL Server Outbox persistence.
+- BackgroundService-based Outbox publishing.
+- RabbitMQ topic exchange, durable queue, and routing configuration.
+- Persistent RabbitMQ messages.
+- Publisher confirmation tracking.
+- Recording of successful publication timestamps.
+- Recording of failed publication attempts.
+- Automatic retry through periodic polling.
+- Recovery from temporary RabbitMQ unavailability.
+- Cancellation-aware background processing.
 
-The current development API also permits registration requests for unpublished sessions. Publication and eligibility rules must be enforced before public use.
+### Current Limitations
+
+The initial implementation is intended for local development with a single active publisher instance.
+
+Additional reliability mechanisms are required before production use, including:
+
+- Automated RabbitMQ integration and failure-recovery tests.
+- Safe coordination between multiple publisher instances.
+- Improved retry scheduling and exponential backoff.
+- Handling of permanently failing messages.
+- Operational monitoring and alerting.
+- Message retention and Outbox cleanup.
+- Independent publisher deployment where operationally justified.
+
+The Allocation Worker does not yet consume registration messages.
+
+Session inventory provisioning, concurrency-safe allocation, idempotent consumers, and allocation-result processing remain planned development tasks.
+
+The current HTTP API is not ready for public production deployment.
 
 ## 10. Next Steps
 

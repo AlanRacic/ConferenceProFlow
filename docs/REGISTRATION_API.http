@@ -1,5 +1,17 @@
 @baseUrl = https://localhost:7217
 
+# ConferenceProFlow — Registration API
+#
+# Execute requests in order when testing a fresh database.
+# Visual Studio reuses IDs from previous HTTP responses.
+#
+# Before repeating the full workflow, use a new participant
+# email address to avoid duplicate registration conflicts.
+#
+# The current development API permits registration for
+# unpublished sessions. This is not intended for production.
+
+
 ### Get all conferences
 
 GET {{baseUrl}}/api/conferences
@@ -7,6 +19,7 @@ GET {{baseUrl}}/api/conferences
 
 ### Create a conference
 
+# @name createConference
 POST {{baseUrl}}/api/conferences
 Content-Type: application/json
 
@@ -17,14 +30,15 @@ Content-Type: application/json
 }
 
 
-### Get a conference by ID
+### Get the created conference
 
-GET {{baseUrl}}/api/conferences/c27da0ad-de5a-49d4-97a7-74d080ff368e
+GET {{baseUrl}}/api/conferences/{{createConference.response.body.$.id}}
 
 
 ### Create a conference session
 
-POST {{baseUrl}}/api/conferences/c27da0ad-de5a-49d4-97a7-74d080ff368e/sessions
+# @name createSession
+POST {{baseUrl}}/api/conferences/{{createConference.response.body.$.id}}/sessions
 Content-Type: application/json
 
 {
@@ -36,47 +50,65 @@ Content-Type: application/json
 
 ### Get conference sessions
 
-GET {{baseUrl}}/api/conferences/835b2ad3-fe20-4eef-8a59-c9332faffb15/sessions
+GET {{baseUrl}}/api/conferences/{{createConference.response.body.$.id}}/sessions
+
+
+### Get the created session
+
+GET {{baseUrl}}/api/conferences/{{createConference.response.body.$.id}}/sessions/{{createSession.response.body.$.id}}
 
 
 ### Create a participant
+
+# @name createParticipant
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Emily Carter",
+  "email": "emily.carter@example.com"
+}
+
+
+### Get the created participant
+
+GET {{baseUrl}}/api/participants/{{createParticipant.response.body.$.id}}
+
+
+### Create a registration
+
+# @name createRegistration
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{createParticipant.response.body.$.id}}",
+  "sessionId": "{{createSession.response.body.$.id}}"
+}
+
+
+### Get the created registration
+
+GET {{baseUrl}}/api/registrations/{{createRegistration.response.body.$.id}}
+
+
+### Attempt duplicate participant (expected: 409 Conflict)
 
 POST {{baseUrl}}/api/participants
 Content-Type: application/json
 
 {
-  "displayName": "Mark Horvat",
-  "email": "mark.horvat@example.com"
+  "displayName": "Emily Carter",
+  "email": "EMILY.CARTER@example.com"
 }
 
 
-### Get participant by ID
-
-GET {{baseUrl}}/api/participants/cf1bf21e-f09c-48f3-aead-1063b1e5ce3b
-
-
-### Create a registration
+### Attempt duplicate registration (expected: 409 Conflict)
 
 POST {{baseUrl}}/api/registrations
 Content-Type: application/json
 
 {
-  "participantId": "cf1bf21e-f09c-48f3-aead-1063b1e5ce3b",
-  "sessionId": "835b2ad3-fe20-4eef-8a59-c9332faffb15"
-}
-
-
-### Get registration by ID
-
-GET {{baseUrl}}/api/registrations/bd19b3e0-511a-4ed8-aa98-026a69652194
-
-
-### Attempt duplicate participant
-
-POST {{baseUrl}}/api/participants
-Content-Type: application/json
-
-{
-  "displayName": "Mark Horvat",
-  "email": "MARK.HORVAT@example.com"
+  "participantId": "{{createParticipant.response.body.$.id}}",
+  "sessionId": "{{createSession.response.body.$.id}}"
 }
