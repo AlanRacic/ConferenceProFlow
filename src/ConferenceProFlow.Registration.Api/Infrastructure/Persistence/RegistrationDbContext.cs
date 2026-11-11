@@ -183,9 +183,12 @@ public sealed class RegistrationDbContext : DbContext
 
             entity.Property(x => x.NextAttemptAtUtc);
 
+            entity.Property(x => x.QuarantinedAtUtc);
+
             entity.HasIndex(x => new
             {
                 x.PublishedAtUtc,
+                x.QuarantinedAtUtc,
                 x.NextAttemptAtUtc,
                 x.OccurredAtUtc
             })

@@ -23,6 +23,8 @@ public sealed class OutboxMessage
 
     public DateTimeOffset? NextAttemptAtUtc { get; private set; }
 
+    public DateTimeOffset? QuarantinedAtUtc { get; private set; }
+
     public static OutboxMessage Create(
         Guid id,
         string messageType,
@@ -65,7 +67,8 @@ public sealed class OutboxMessage
             PublishedAtUtc = null,
             PublishAttempts = 0,
             LastError = null,
-            NextAttemptAtUtc = null
+            NextAttemptAtUtc = null,
+            QuarantinedAtUtc = null
         };
     }
 
@@ -84,6 +87,11 @@ public sealed class OutboxMessage
         if (publishedAtUtc < OccurredAtUtc)
         {
             throw new ArgumentException("PublishedAtUtc cannot precede OccurredAtUtc.", nameof(publishedAtUtc));
+        }
+
+        if (QuarantinedAtUtc is not null)
+        {
+            throw new InvalidOperationException("Cannot publish a quarantined message.");
         }
 
         PublishAttempts++;
@@ -121,10 +129,58 @@ public sealed class OutboxMessage
             normalizedError = normalizedError[..2000];
         }
 
+        if (QuarantinedAtUtc is not null)
+        {
+            throw new InvalidOperationException("Cannot retry a quarantined message.");
+        }
+
         PublishAttempts++;
 
         LastError = normalizedError;
 
         NextAttemptAtUtc = failedAtUtc + OutboxRetryPolicy.GetDelay(PublishAttempts);
+    }
+
+    public void Quarantine(string reason, DateTimeOffset quarantinedAtUtc)
+    {
+        if (PublishedAtUtc is not null)
+        {
+            throw new InvalidOperationException("Cannot quarantine a published message.");
+        }
+
+        if (QuarantinedAtUtc is not null)
+        {
+            throw new InvalidOperationException("Outbox message is already quarantined.");
+        }
+
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new ArgumentException("Quarantine reason is required.", nameof(reason));
+        }
+
+        if (quarantinedAtUtc == default || quarantinedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("QuarantinedAtUtc must be a valid UTC timestamp.", nameof(quarantinedAtUtc));
+        }
+
+        if (quarantinedAtUtc < OccurredAtUtc)
+        {
+            throw new ArgumentException("QuarantinedAtUtc cannot precede OccurredAtUtc.", nameof(quarantinedAtUtc));
+        }
+
+        var normalizedReason = reason.Trim();
+
+        if (normalizedReason.Length > 2000)
+        {
+            normalizedReason = normalizedReason[..2000];
+        }
+
+        PublishAttempts++;
+
+        LastError = normalizedReason;
+
+        NextAttemptAtUtc = null;
+
+        QuarantinedAtUtc = quarantinedAtUtc;
     }
 }

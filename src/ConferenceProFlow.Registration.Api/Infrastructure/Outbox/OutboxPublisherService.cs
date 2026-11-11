@@ -9,6 +9,8 @@ public sealed class OutboxPublisherService : BackgroundService
 {
     private static readonly TimeSpan PollingInterval = TimeSpan.FromSeconds(5);
 
+    private readonly TimeSpan _publishTimeout;
+
     private const int BatchSize = 20;
 
     private readonly IServiceScopeFactory _scopeFactory;
@@ -25,6 +27,15 @@ public sealed class OutboxPublisherService : BackgroundService
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
+
+        var publishTimeoutSeconds = configuration.GetValue<int?>("OutboxPublisher:PublishTimeoutSeconds") ?? 15;
+
+        if (publishTimeoutSeconds < 1 || publishTimeoutSeconds > 120)
+        {
+            throw new InvalidOperationException("OutboxPublisher:PublishTimeoutSeconds must be between 1 and 120.");
+        }
+
+        _publishTimeout = TimeSpan.FromSeconds(publishTimeoutSeconds);
 
         _connectionFactory = new ConnectionFactory
         {
@@ -94,6 +105,7 @@ public sealed class OutboxPublisherService : BackgroundService
         var messages = await db.OutboxMessages
             .Where(x =>
                 x.PublishedAtUtc == null &&
+                x.QuarantinedAtUtc == null &&
                 (x.NextAttemptAtUtc == null ||
                  x.NextAttemptAtUtc <= utcNow))
             .OrderBy(x => x.OccurredAtUtc)
@@ -108,11 +120,34 @@ public sealed class OutboxPublisherService : BackgroundService
 
         foreach (var message in messages)
         {
+            // Validate known message contracts before contacting RabbitMQ.
+            var permanentError = OutboxPayloadValidator.GetPermanentError(message);
+
+            if (permanentError is not null)
+            {
+                message.Quarantine(permanentError, DateTimeOffset.UtcNow);
+
+                await db.SaveChangesAsync(cancellationToken);
+
+                _logger.LogError(
+                    "Outbox message {MessageId} was quarantined. Reason: {Reason}",
+                    message.Id,
+                    permanentError);
+
+                continue;
+            }
+
+            // Limit the RabbitMQ attempt while respecting application shutdown.
+            using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            attemptCts.CancelAfter(_publishTimeout);
+
             try
             {
-                await EnsureRabbitMqConnectionAsync(cancellationToken);
+                await EnsureRabbitMqConnectionAsync(attemptCts.Token);
 
-                var channel = _channel ?? throw new InvalidOperationException("RabbitMQ channel is not initialized.");
+                var channel = _channel
+                    ?? throw new InvalidOperationException("RabbitMQ channel is not initialized.");
 
                 var properties = new BasicProperties
                 {
@@ -124,25 +159,32 @@ public sealed class OutboxPublisherService : BackgroundService
 
                 var body = Encoding.UTF8.GetBytes(message.Payload);
 
-                // Await the broker's publisher confirmation.
+                // Publisher confirmation is awaited with a bounded token.
                 await channel.BasicPublishAsync(
                     exchange: MessagingTopology.ExchangeName,
                     routingKey: message.MessageType,
                     mandatory: true,
                     basicProperties: properties,
                     body: body,
-                    cancellationToken: cancellationToken);
+                    cancellationToken: attemptCts.Token);
             }
             catch (OperationCanceledException)
                 when (cancellationToken.IsCancellationRequested)
             {
+                // Application shutdown is not a publishing failure.
                 throw;
             }
             catch (Exception ex)
             {
-                var error = string.IsNullOrWhiteSpace(ex.Message)
-                    ? ex.GetType().Name
-                    : ex.Message;
+                var error =
+                    ex is OperationCanceledException &&
+                    attemptCts.IsCancellationRequested
+                        ? $"RabbitMQ publishing attempt exceeded " +
+                          $"{_publishTimeout.TotalSeconds:0} seconds; " +
+                          "publication outcome is uncertain."
+                        : string.IsNullOrWhiteSpace(ex.Message)
+                            ? ex.GetType().Name
+                            : ex.Message;
 
                 message.RecordFailure(error, DateTimeOffset.UtcNow);
 
@@ -161,7 +203,7 @@ public sealed class OutboxPublisherService : BackgroundService
                 continue;
             }
 
-            // This runs only after successful broker confirmation.
+            // Only record success after the broker confirms publication.
             message.MarkPublished(DateTimeOffset.UtcNow);
 
             await db.SaveChangesAsync(cancellationToken);

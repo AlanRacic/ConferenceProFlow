@@ -167,9 +167,12 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                     b.Property<DateTimeOffset?>("PublishedAtUtc")
                         .HasColumnType("datetimeoffset");
 
+                    b.Property<DateTimeOffset?>("QuarantinedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("PublishedAtUtc", "NextAttemptAtUtc", "OccurredAtUtc")
+                    b.HasIndex("PublishedAtUtc", "QuarantinedAtUtc", "NextAttemptAtUtc", "OccurredAtUtc")
                         .HasDatabaseName("IX_OutboxMessages_PublishStatus");
 
                     b.ToTable("OutboxMessages", null, t =>
