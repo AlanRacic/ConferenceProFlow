@@ -2,11 +2,13 @@
 
 ## 1. Overview
 
-ConferenceProFlow will use RabbitMQ for asynchronous communication between the Registration API and the Allocation Worker.
+ConferenceProFlow uses RabbitMQ for asynchronous communication between the Registration API and the Allocation Worker.
 
-The messaging architecture is designed to support reliable event publication, independent service ownership, idempotent processing, and eventual consistency.
+The messaging architecture is designed around independent service ownership, reliable publication of integration events, eventual consistency, and idempotent message processing.
 
-The Registration service will use the Transactional Outbox pattern to connect registration persistence with outgoing integration messages.
+The Registration service implements the Transactional Outbox pattern. Registration data and the corresponding outgoing event are committed to the same SQL Server database transaction. A background publisher subsequently sends pending Outbox messages to RabbitMQ.
+
+**Implementation status:** Registration-side Outbox persistence and RabbitMQ publishing are implemented and tested. RabbitMQ consumption and allocation processing are planned for subsequent milestones.
 
 ## 2. Service Responsibilities
 
@@ -16,34 +18,23 @@ The Registration API owns:
 
 - Conference and session information.
 - Participant records.
-- Registration requests.
-- Registration lifecycle state.
-- Registration Outbox messages.
-- Processing of future allocation results.
+- Registration requests and lifecycle state.
+- Registration Outbox messages and their publication state.
+- Future processing of allocation-result events.
 
 ### Allocation Service
 
 The Allocation Worker owns:
 
-- Session inventory.
-- Session capacity.
-- Allocation records.
-- Capacity allocation decisions.
-- Processing of incoming registration requests.
+- Session inventory and capacity.
+- Allocation records and capacity decisions.
+- Future consumption of registration-request events.
 
-Each service maintains independent database ownership.
-
-Neither service may directly modify the other service's database.
+Each service maintains its own SQL Server database. Neither service directly modifies the other service's database.
 
 ## 3. Initial Integration Event
 
-The first integration event is:
-
-`RegistrationRequestedV1`
-
-Message type:
-
-`registration.requested.v1`
+The first integration event is `RegistrationRequestedV1`, with message type `registration.requested.v1`.
 
 The event represents a newly created registration request awaiting allocation.
 
@@ -51,12 +42,12 @@ The event represents a newly created registration request awaiting allocation.
 
 | Field | Type | Description |
 |---|---|---|
-| MessageId | Guid | Unique integration message identifier |
-| RegistrationId | Guid | Business identifier of the registration |
-| SessionId | Guid | Target conference session |
-| OccurredAtUtc | DateTimeOffset | UTC timestamp of the event |
+| `MessageId` | `Guid` | Unique integration message identifier |
+| `RegistrationId` | `Guid` | Business identifier of the registration |
+| `SessionId` | `Guid` | Target conference session |
+| `OccurredAtUtc` | `DateTimeOffset` | UTC timestamp of the event |
 
-The event does not contain participant personal information because the Allocation Worker does not require it.
+The event deliberately excludes participant personal information because the Allocation Worker does not require it to make an allocation decision.
 
 ### JSON Representation
 
@@ -69,146 +60,230 @@ The event does not contain participant personal information because the Allocati
 }
 ```
 
-The JSON contract uses camelCase property names and UTC timestamps.
+The JSON contract uses camelCase property names and UTC timestamps. Integration contracts are versioned independently of internal C# namespaces and domain entities.
 
-Message contracts are versioned independently of internal C# namespaces and domain entities.
+## 4. Message Identity and Delivery Semantics
 
-## 4. Message Identity
+`MessageId` identifies an integration message. `RegistrationId` identifies the underlying business registration. The Outbox row identifier equals the event's `MessageId`.
 
-`MessageId` identifies a particular integration message.
+The publisher provides **at-least-once publication behavior**, subject to continued retries and recovery of its dependencies; it does not provide exactly-once delivery or exactly-once business execution.
 
-`RegistrationId` identifies the underlying business registration.
+A message can reach RabbitMQ successfully even if the publisher crashes before persisting `PublishedAtUtc`. A subsequent attempt can publish the same `MessageId` again.
 
-A message may be delivered more than once.
+RabbitMQ publisher confirmation indicates broker acceptance of the publication, **not** that the Allocation Worker has processed the registration.
 
-Consumers must therefore distinguish message delivery from business execution.
-
-For allocation processing, repeated requests for the same RegistrationId must not create additional seat reservations.
+The future Allocation consumer must be idempotent: repeated delivery of a message, or repeated requests concerning the same `RegistrationId`, must not create duplicate allocations or reserve additional seats.
 
 ## 5. Transactional Outbox
 
-The Registration service stores outgoing messages in its own database.
+The Registration service stores Outbox messages in its own SQL Server database.
 
-The planned Outbox schema contains:
+### Outbox Schema
 
-- Id
-- MessageType
-- Payload
-- OccurredAtUtc
-- PublishedAtUtc
-- PublishAttempts
-- LastError
+The implemented `OutboxMessages` entity contains:
 
-A newly created message is unpublished until successful publication has been recorded.
+| Field | Purpose |
+|---|---|
+| `Id` | Unique Outbox identifier; matches the event `MessageId` |
+| `MessageType` | Versioned event type and RabbitMQ routing key |
+| `Payload` | Serialized event JSON |
+| `OccurredAtUtc` | Event creation timestamp |
+| `PublishedAtUtc` | Set after confirmed publication; otherwise `NULL` |
+| `PublishAttempts` | Count of recorded processing attempts, including successful publication, failed publication, and quarantine validation |
+| `LastError` | Most recently recorded failure or quarantine reason |
+| `NextAttemptAtUtc` | Earliest eligible retry time; `NULL` means no scheduled delay |
+| `QuarantinedAtUtc` | Set when a permanently invalid payload is excluded from automatic publishing |
 
-Registration creation and the corresponding Outbox record must be persisted atomically.
+An index named `IX_OutboxMessages_PublishStatus` supports queries over publication, quarantine, and retry status.
 
-The Outbox Publisher will asynchronously read unpublished messages and publish them to RabbitMQ.
+### Atomic Registration Write
 
-The Registration API must not require RabbitMQ availability to complete the local registration transaction.
+Creating a registration writes both the new registration and its `RegistrationRequestedV1` Outbox message within one EF Core `SaveChangesAsync` transaction.
 
-## 6. Reliability Requirements
+- If the local database transaction fails, neither record is committed.
+- If it succeeds, the registration initially remains `Pending` while allocation has not yet occurred.
+- RabbitMQ availability is **not required** for the HTTP registration transaction to succeed.
 
-### Database Transaction Failure
+### Background Publication
 
-If the local transaction fails, neither the registration nor the corresponding Outbox message may be committed.
+`OutboxPublisherService` runs as a `BackgroundService` within the Registration API process.
 
-### Application Failure Before Publication
+It polls for eligible messages approximately every five seconds, processes batches of up to 20, publishes persistent messages to RabbitMQ, and waits for publisher confirmation before recording `PublishedAtUtc`.
 
-If the Registration API stops after committing the transaction, the Outbox message remains available for later publishing.
+Messages are eligible when they are unpublished, not quarantined, and have no future `NextAttemptAtUtc` value. An unsuccessful message does not automatically stop processing the other messages already selected in the batch.
 
-### RabbitMQ Unavailability
+The current implementation assumes **one active publisher instance**. It does not claim or lease Outbox rows for coordination among multiple application replicas.
 
-Unpublished messages remain in SQL Server and can be retried after RabbitMQ becomes available.
+## 6. Reliability and Failure Handling
 
-### Duplicate Publication
+### 6.1. Failure Scenarios
 
-A message may be published successfully even if the publisher fails before recording the publication result.
+| Scenario | Expected behavior |
+|---|---|
+| Database transaction fails | Neither registration nor Outbox message is committed |
+| Application stops after database commit | Unpublished Outbox message remains in SQL Server |
+| RabbitMQ is unavailable | Failure is recorded; message remains eligible for a later retry |
+| RabbitMQ publication times out | Outcome is treated as uncertain; message is retained for retry |
+| Routing key has no matching binding | Publishing failure is recorded; message remains unpublished |
+| Known event payload is permanently invalid | Message is quarantined in SQL Server |
+| RabbitMQ accepts a message but SQL status update fails | Duplicate publication is possible on retry |
 
-The system must therefore tolerate repeated publication and delivery.
+### 6.2. Persistent Retry Scheduling
 
-### Consumer Idempotency
+Failed publication attempts are recorded in SQL Server. `NextAttemptAtUtc` determines when an unpublished message may be retried.
 
-The Allocation Worker must prevent repeated messages from creating duplicate allocations or reserving additional seats.
+The retry policy uses capped exponential backoff:
+
+| Failed attempt | Delay until next attempt |
+|---|---:|
+| 1 | 10 seconds |
+| 2 | 20 seconds |
+| 3 | 40 seconds |
+| 4 | 80 seconds |
+| 5 | 160 seconds |
+| 6 and later | 300 seconds |
+
+Retry delays are capped at five minutes; **the number of transient-failure retries is not capped**. A prolonged infrastructure outage should not automatically quarantine otherwise valid messages.
+
+The polling loop can continue publishing other eligible messages while an unsuccessful message is deferred. This mitigates head-of-line blocking, but it does not replace a full queue-scheduling or distributed-work coordination mechanism.
+
+### 6.3. Publish Timeout
+
+RabbitMQ connection and publishing attempts use a configurable linked cancellation token. The default value of `OutboxPublisher:PublishTimeoutSeconds` is **15 seconds**.
+
+The timeout limits the intended attempt, but does not guarantee that every RabbitMQ.Client operation, including connection cleanup, finishes within that exact duration.
+
+A timeout does not prove that the broker rejected the message. Consequently, retrying after a timeout can produce duplicates.
+
+### 6.4. Payload Validation and Quarantine
+
+Before publication, `OutboxPayloadValidator` validates the known `RegistrationRequestedV1` contract, including:
+
+- Valid JSON that can be deserialized into the event contract.
+- Matching payload `MessageId` and Outbox `Id`.
+- Nonempty `RegistrationId` and `SessionId`.
+- A valid UTC `OccurredAtUtc` timestamp.
+
+A permanently invalid known payload is **quarantined**, rather than repeatedly sent to RabbitMQ. Its Outbox row is retained, `QuarantinedAtUtc` and `LastError` are recorded, and automatic publishing excludes it.
+
+Quarantine is a **SQL Outbox state**, not a RabbitMQ dead-letter queue. An audited administrative repair/requeue workflow has not yet been implemented.
+
+Unknown future message types do not yet have dedicated payload validators. An unknown routing key may remain unpublished and be retried with backoff if RabbitMQ cannot route it.
 
 ## 7. RabbitMQ Topology
 
-The initial planned topology is:
+The implemented local-development topology is:
 
-| Component | Name |
+| Component | Name or behavior |
 |---|---|
 | Virtual host | `conferenceproflow` |
 | Exchange | `conferenceproflow.events` |
-| Exchange type | `topic` |
+| Exchange type | Durable `topic` exchange |
 | Routing key | `registration.requested.v1` |
-| Consumer queue | `allocation.registration-requests.v1` |
+| Queue | `allocation.registration-requests.v1` |
+| Queue configuration | Durable |
+| Message configuration | Persistent; JSON content type; stable message ID |
+| Publication | Publisher confirmations enabled; mandatory routing enabled |
 
-These names define the intended topology.
+The publisher currently declares the exchange, queue, and binding when establishing its RabbitMQ connection for publication. In this project phase, that lets the Registration API publish before a consumer has been implemented.
 
-Publisher confirmations, persistent messages, durable queues, and routing-failure handling will be considered together.
+In a more independently deployed system, queue declaration would generally belong to the consuming service or to infrastructure provisioning. This ownership boundary should be revisited when the Allocation consumer is added.
+
+Integration tests use an isolated RabbitMQ Testcontainer and may use its default virtual host instead of the development virtual host.
 
 ## 8. Eventual Consistency
 
-Registration and Allocation maintain independent databases.
+Registration and Allocation maintain separate databases and do not share a distributed SQL transaction.
 
-They do not share a distributed SQL transaction.
+A new registration remains `Pending` while its allocation decision is outstanding. Successful RabbitMQ publication does **not** change the registration to `Confirmed` or `Rejected`.
 
-A registration may temporarily remain Pending while allocation is being processed.
+The planned flow is:
 
-The final registration status will be updated after an allocation result is received and safely processed.
+1. Registration API persists a `Pending` registration and its Outbox event atomically.
+2. Outbox Publisher sends `registration.requested.v1` to RabbitMQ.
+3. Allocation Worker consumes the message and makes a capacity-safe, idempotent allocation decision. **Not yet implemented.**
+4. Allocation Service publishes an allocation-result event. **Not yet implemented.**
+5. Registration Service consumes the result and updates registration status. **Not yet implemented.**
 
-The system must tolerate temporary service unavailability, retries, and duplicate deliveries.
+Temporary service unavailability, retries, and repeated delivery are expected conditions in this design.
 
-## 9. Current Implementation and Limitations
+## 9. Automated Testing
 
-The Registration service implements Transactional Outbox persistence and an initial RabbitMQ Outbox Publisher.
+Registration-side messaging behavior is covered by unit and integration tests.
 
-### Implemented
+### Unit Tests
 
-- Atomic persistence of registration requests and corresponding Outbox messages.
-- Versioned `RegistrationRequestedV1` integration events.
-- JSON serialization of outgoing messages.
-- SQL Server Outbox persistence.
-- BackgroundService-based Outbox publishing.
-- RabbitMQ topic exchange, durable queue, and routing configuration.
-- Persistent RabbitMQ messages.
-- Publisher confirmation tracking.
-- Recording of successful publication timestamps.
-- Recording of failed publication attempts.
-- Automatic retry through periodic polling.
-- Recovery from temporary RabbitMQ unavailability.
-- Cancellation-aware background processing.
+- Outbox message creation and state transitions.
+- Failure recording, retry scheduling, and capped exponential backoff.
+- Publication state cleanup after success.
+- Payload validation and quarantine rules.
 
-### Current Limitations
+### Integration Tests
 
-The initial implementation is intended for local development with a single active publisher instance.
+- Atomic registration and Outbox persistence in SQL Server.
+- Publishing to a real RabbitMQ Testcontainer and recording the confirmed result.
+- Unavailable-broker failure recording and recovery.
+- Unroutable-message handling and failure isolation.
+- Demonstration that duplicate publication can occur.
+- Deferred-message processing without blocking an eligible message.
+- Quarantine of an invalid payload without blocking a valid message.
 
-Additional reliability mechanisms are required before production use, including:
+Messaging integration tests use isolated databases and RabbitMQ test brokers to avoid dependence on execution order or messages left by other tests.
 
-- Automated RabbitMQ integration and failure-recovery tests.
-- Safe coordination between multiple publisher instances.
-- Improved retry scheduling and exponential backoff.
-- Handling of permanently failing messages.
-- Operational monitoring and alerting.
-- Message retention and Outbox cleanup.
-- Independent publisher deployment where operationally justified.
+These tests validate the implemented scenarios; they do not establish exactly-once delivery, multi-instance safety, or all possible broker/network fault conditions.
 
-The Allocation Worker does not yet consume registration messages.
+## 10. Operational Visibility
 
-Session inventory provisioning, concurrency-safe allocation, idempotent consumers, and allocation-result processing remain planned development tasks.
+The publisher emits structured logs for startup, RabbitMQ connection/topology initialization, publication success, retryable failures, and quarantined messages.
 
-The current HTTP API is not ready for public production deployment.
+Trusted developers and operators can inspect the `OutboxMessages` table to monitor:
 
-## 10. Next Steps
+- Pending and deferred messages.
+- Quarantined messages requiring investigation.
+- Messages with many recorded attempts.
+- The age of the oldest unpublished message.
+- Recent error details and scheduled retry times.
 
-Upcoming implementation phases will introduce:
+Example SQL query:
 
-1. EF Core Outbox persistence and atomic registration writes.
-2. RabbitMQ Outbox publishing.
-3. Publisher confirmation and retry handling.
-4. Automated messaging integration tests.
-5. Allocation consumers and idempotency.
-6. Concurrency-safe seat allocation.
-7. Allocation-result events and Registration status updates.
+```sql
+DECLARE @UtcNow datetimeoffset = TODATETIMEOFFSET(SYSUTCDATETIME(), '+00:00');
 
-The architecture will prioritize data consistency, explicit failure handling, and reproducible local development.
+SELECT
+    COUNT(*) AS TotalMessages,
+    COALESCE(SUM(CASE WHEN PublishedAtUtc IS NOT NULL THEN 1 ELSE 0 END), 0) AS PublishedMessages,
+    COALESCE(SUM(CASE WHEN PublishedAtUtc IS NULL AND QuarantinedAtUtc IS NULL THEN 1 ELSE 0 END), 0) AS PendingMessages,
+    COALESCE(SUM(CASE WHEN QuarantinedAtUtc IS NOT NULL THEN 1 ELSE 0 END), 0) AS QuarantinedMessages,
+    COALESCE(SUM(CASE WHEN PublishedAtUtc IS NULL AND QuarantinedAtUtc IS NULL
+                      AND NextAttemptAtUtc > @UtcNow THEN 1 ELSE 0 END), 0) AS DeferredMessages
+FROM dbo.OutboxMessages;
+```
+
+Operational SQL queries are intended for trusted development and administration. They must not be exposed through an unauthenticated public API.
+
+There is not yet a dedicated production monitoring dashboard, alerting policy, or audited quarantine-recovery operation.
+
+## 11. Current Limitations
+
+- The publisher assumes one active instance; concurrent publishers need database claiming/leasing or equivalent coordination.
+- RabbitMQ publisher confirmations do not establish downstream consumer processing.
+- Publication is at-least-once, not exactly-once; duplicate deliveries remain possible.
+- The configured cancellation timeout is not a hard end-to-end bound on all client and cleanup operations.
+- Unknown message contracts do not have dedicated validators; unsupported routing may cause repeated retries.
+- Quarantined messages require manual investigation; safe administrative repair/requeue is not implemented.
+- Retry behavior has no dedicated production alerting or automated intervention workflow.
+- The Allocation Worker has not yet implemented RabbitMQ consumption, idempotency, or capacity-safe allocation.
+- Allocation-result messaging and Registration status reconciliation are not yet implemented.
+
+The current implementation is **production-aware**, with selected production-ready engineering practices, rather than a fully production-ready distributed system.
+
+## 12. Next Steps
+
+1. Complete the final M2.3 architecture review, documentation review, and pull request.
+2. Implement an idempotent RabbitMQ consumer in the Allocation Worker, including manual acknowledgements and transactional deduplication.
+3. Implement concurrency-safe seat allocation against the Allocation database.
+4. Publish allocation-result integration events through an appropriate reliable mechanism.
+5. Consume allocation results in Registration and transition registrations from `Pending` to `Confirmed` or `Rejected`.
+6. Revisit topology ownership, operational monitoring, and multi-instance publisher coordination based on deployment requirements.
+
+The architecture prioritizes data consistency, explicit failure handling, testability, and reproducible local development without paid infrastructure.
