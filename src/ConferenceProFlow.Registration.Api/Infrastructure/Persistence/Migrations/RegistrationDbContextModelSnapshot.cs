@@ -151,6 +151,9 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                         .HasMaxLength(160)
                         .HasColumnType("nvarchar(160)");
 
+                    b.Property<DateTimeOffset?>("NextAttemptAtUtc")
+                        .HasColumnType("datetimeoffset");
+
                     b.Property<DateTimeOffset>("OccurredAtUtc")
                         .HasColumnType("datetimeoffset");
 
@@ -166,7 +169,7 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
 
                     b.HasKey("Id");
 
-                    b.HasIndex("PublishedAtUtc", "OccurredAtUtc")
+                    b.HasIndex("PublishedAtUtc", "NextAttemptAtUtc", "OccurredAtUtc")
                         .HasDatabaseName("IX_OutboxMessages_PublishStatus");
 
                     b.ToTable("OutboxMessages", null, t =>

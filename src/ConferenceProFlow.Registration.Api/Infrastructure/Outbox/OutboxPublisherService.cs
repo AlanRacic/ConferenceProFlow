@@ -89,8 +89,13 @@ public sealed class OutboxPublisherService : BackgroundService
 
         var db = scope.ServiceProvider.GetRequiredService<RegistrationDbContext>();
 
+        var utcNow = DateTimeOffset.UtcNow;
+
         var messages = await db.OutboxMessages
-            .Where(x => x.PublishedAtUtc == null)
+            .Where(x =>
+                x.PublishedAtUtc == null &&
+                (x.NextAttemptAtUtc == null ||
+                 x.NextAttemptAtUtc <= utcNow))
             .OrderBy(x => x.OccurredAtUtc)
             .ThenBy(x => x.Id)
             .Take(BatchSize)
@@ -139,16 +144,20 @@ public sealed class OutboxPublisherService : BackgroundService
                     ? ex.GetType().Name
                     : ex.Message;
 
-                message.RecordFailure(error);
+                message.RecordFailure(error, DateTimeOffset.UtcNow);
 
                 await db.SaveChangesAsync(cancellationToken);
 
-                _logger.LogWarning(ex, "Publishing failed for Outbox message {MessageId}.", message.Id);
+                _logger.LogWarning(
+                    ex,
+                    "Publishing failed for Outbox message {MessageId}. " +
+                    "Attempt {PublishAttempts}. Next retry at {NextAttemptAtUtc}.",
+                    message.Id,
+                    message.PublishAttempts,
+                    message.NextAttemptAtUtc);
 
                 await ResetRabbitMqAsync();
 
-                // Continue processing other messages in this batch.
-                // The failed message remains unpublished for a future retry.
                 continue;
             }
 

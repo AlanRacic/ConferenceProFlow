@@ -21,6 +21,8 @@ public sealed class OutboxMessage
 
     public string? LastError { get; private set; }
 
+    public DateTimeOffset? NextAttemptAtUtc { get; private set; }
+
     public static OutboxMessage Create(
         Guid id,
         string messageType,
@@ -62,7 +64,8 @@ public sealed class OutboxMessage
             OccurredAtUtc = occurredAtUtc,
             PublishedAtUtc = null,
             PublishAttempts = 0,
-            LastError = null
+            LastError = null,
+            NextAttemptAtUtc = null
         };
     }
 
@@ -86,9 +89,10 @@ public sealed class OutboxMessage
         PublishAttempts++;
         PublishedAtUtc = publishedAtUtc;
         LastError = null;
+        NextAttemptAtUtc = null;
     }
 
-    public void RecordFailure(string error)
+    public void RecordFailure(string error, DateTimeOffset failedAtUtc)
     {
         if (PublishedAtUtc is not null)
         {
@@ -100,6 +104,16 @@ public sealed class OutboxMessage
             throw new ArgumentException("Error description is required.", nameof(error));
         }
 
+        if (failedAtUtc == default || failedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("FailedAtUtc must be a valid UTC timestamp.", nameof(failedAtUtc));
+        }
+
+        if (failedAtUtc < OccurredAtUtc)
+        {
+            throw new ArgumentException("FailedAtUtc cannot precede OccurredAtUtc.", nameof(failedAtUtc));
+        }
+
         var normalizedError = error.Trim();
 
         if (normalizedError.Length > 2000)
@@ -108,6 +122,9 @@ public sealed class OutboxMessage
         }
 
         PublishAttempts++;
+
         LastError = normalizedError;
+
+        NextAttemptAtUtc = failedAtUtc + OutboxRetryPolicy.GetDelay(PublishAttempts);
     }
 }

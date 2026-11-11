@@ -181,9 +181,12 @@ public sealed class RegistrationDbContext : DbContext
             entity.Property(x => x.LastError)
                 .HasMaxLength(2000);
 
+            entity.Property(x => x.NextAttemptAtUtc);
+
             entity.HasIndex(x => new
             {
                 x.PublishedAtUtc,
+                x.NextAttemptAtUtc,
                 x.OccurredAtUtc
             })
             .HasDatabaseName("IX_OutboxMessages_PublishStatus");
