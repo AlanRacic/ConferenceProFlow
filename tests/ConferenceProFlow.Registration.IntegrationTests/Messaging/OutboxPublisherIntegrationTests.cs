@@ -1,5 +1,6 @@
 ﻿using System.Globalization;
 using System.Text.Json;
+using System.Text;
 using ConferenceProFlow.Registration.Api.Features.Registrations.Messages;
 using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
@@ -14,23 +15,24 @@ using RabbitMQ.Client;
 namespace ConferenceProFlow.Registration.IntegrationTests.Messaging;
 
 [Collection("SqlServer")]
-public sealed class OutboxPublisherIntegrationTests : IClassFixture<RabbitMqFixture>, IAsyncLifetime
+public sealed class OutboxPublisherIntegrationTests : IAsyncLifetime
 {
     private readonly SqlServerFixture _sqlFixture;
-    private readonly RabbitMqFixture _rabbitMqFixture;
+    private readonly RabbitMqFixture _rabbitMqFixture = new();
 
     private string? _connectionString;
 
-    public OutboxPublisherIntegrationTests(
-        SqlServerFixture sqlFixture,
-        RabbitMqFixture rabbitMqFixture)
+    public OutboxPublisherIntegrationTests(SqlServerFixture sqlFixture)
     {
         _sqlFixture = sqlFixture;
-        _rabbitMqFixture = rabbitMqFixture;
     }
 
     public async ValueTask InitializeAsync()
     {
+        // Start an isolated RabbitMQ container for this test.
+        await _rabbitMqFixture.InitializeAsync();
+
+        // Create an isolated SQL Server database for this test.
         var connectionBuilder = new SqlConnectionStringBuilder(_sqlFixture.ConnectionString)
         {
             InitialCatalog = $"ConferenceProFlowMessagingTests_{Guid.NewGuid():N}"
@@ -45,14 +47,20 @@ public sealed class OutboxPublisherIntegrationTests : IClassFixture<RabbitMqFixt
 
     public async ValueTask DisposeAsync()
     {
-        if (_connectionString is null)
+        try
         {
-            return;
+            if (_connectionString is not null)
+            {
+                await using var db = CreateDbContext();
+
+                await db.Database.EnsureDeletedAsync();
+            }
         }
-
-        await using var db = CreateDbContext();
-
-        await db.Database.EnsureDeletedAsync();
+        finally
+        {
+            // Always dispose the isolated RabbitMQ container.
+            await _rabbitMqFixture.DisposeAsync();
+        }
     }
 
     private RegistrationDbContext CreateDbContext()
@@ -69,7 +77,7 @@ public sealed class OutboxPublisherIntegrationTests : IClassFixture<RabbitMqFixt
         return new RegistrationDbContext(options);
     }
 
-    private async Task<RegistrationRequestedV1> CreateOutboxMessageAsync()
+    private async Task<RegistrationRequestedV1> CreateOutboxMessageAsync(string messageType = RegistrationRequestedV1.MessageType)
     {
         var integrationEvent = new RegistrationRequestedV1(
             Guid.NewGuid(),
@@ -83,7 +91,7 @@ public sealed class OutboxPublisherIntegrationTests : IClassFixture<RabbitMqFixt
 
         var outboxMessage = OutboxMessage.Create(
             integrationEvent.MessageId,
-            RegistrationRequestedV1.MessageType,
+            messageType,
             payload,
             integrationEvent.OccurredAtUtc);
 
@@ -330,6 +338,244 @@ public sealed class OutboxPublisherIntegrationTests : IClassFixture<RabbitMqFixt
         finally
         {
             await recoveredPublisher.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task UnroutableMessage_RemainsUnpublishedAndRecordsFailure()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var integrationEvent = await CreateOutboxMessageAsync("registration.unroutable.v1");
+
+        var rabbitMqUri = _rabbitMqFixture.ConnectionUri;
+
+        await using var provider = CreatePublisherProvider(rabbitMqUri.Port);
+
+        var publisher = provider.GetRequiredService<IHostedService>();
+
+        // Act
+        await publisher.StartAsync(cancellationToken);
+
+        try
+        {
+            var failedMessage = await WaitForOutboxStateAsync(
+                integrationEvent.MessageId,
+                message =>
+                    message.PublishAttempts > 0 &&
+                    !string.IsNullOrWhiteSpace(message.LastError));
+
+            // Assert
+            Assert.Null(failedMessage.PublishedAtUtc);
+
+            Assert.True(failedMessage.PublishAttempts >= 1);
+
+            Assert.False(string.IsNullOrWhiteSpace(failedMessage.LastError));
+        }
+        finally
+        {
+            await publisher.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task UnroutableMessage_DoesNotBlockFollowingValidMessage()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        // Create the failing message first.
+        var unroutableEvent = await CreateOutboxMessageAsync("registration.unroutable.v1");
+
+        // Create a valid message afterward.
+        var validEvent = await CreateOutboxMessageAsync();
+
+        var rabbitMqUri = _rabbitMqFixture.ConnectionUri;
+
+        await using var provider = CreatePublisherProvider(rabbitMqUri.Port);
+
+        var publisher = provider.GetRequiredService<IHostedService>();
+
+        // Act
+        await publisher.StartAsync(cancellationToken);
+
+        try
+        {
+            // The valid message must eventually be published.
+            var publishedMessage = await WaitForOutboxStateAsync(
+                validEvent.MessageId,
+                message => message.PublishedAtUtc is not null);
+
+            // Verify that the failing message remains unpublished.
+            await using var db = CreateDbContext();
+
+            var failedMessage = await db.OutboxMessages
+                .AsNoTracking()
+                .SingleAsync(
+                    x => x.Id == unroutableEvent.MessageId,
+                    cancellationToken);
+
+            // Assert
+            Assert.Null(failedMessage.PublishedAtUtc);
+
+            Assert.True(failedMessage.PublishAttempts >= 1);
+
+            Assert.NotNull(publishedMessage.PublishedAtUtc);
+
+            Assert.Equal(
+                RegistrationRequestedV1.MessageType,
+                publishedMessage.MessageType);
+        }
+        finally
+        {
+            await publisher.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task PreviouslyDeliveredMessage_CanBePublishedAgain()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var integrationEvent = await CreateOutboxMessageAsync();
+
+        var rabbitMqUri = _rabbitMqFixture.ConnectionUri;
+
+        var connectionFactory = new ConnectionFactory
+        {
+            Uri = rabbitMqUri
+        };
+
+        // Simulate a message already accepted by RabbitMQ.
+        await using (var connection =
+            await connectionFactory.CreateConnectionAsync(
+                cancellationToken))
+        {
+            var channelOptions = new CreateChannelOptions(
+                publisherConfirmationsEnabled: true,
+                publisherConfirmationTrackingEnabled: true);
+
+            await using var channel =
+                await connection.CreateChannelAsync(
+                    channelOptions,
+                    cancellationToken);
+
+            await channel.ExchangeDeclareAsync(
+                exchange: MessagingTopology.ExchangeName,
+                type: ExchangeType.Topic,
+                durable: true,
+                autoDelete: false,
+                cancellationToken: cancellationToken);
+
+            await channel.QueueDeclareAsync(
+                queue: MessagingTopology.RegistrationRequestsQueue,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                cancellationToken: cancellationToken);
+
+            await channel.QueueBindAsync(
+                queue: MessagingTopology.RegistrationRequestsQueue,
+                exchange: MessagingTopology.ExchangeName,
+                routingKey: RegistrationRequestedV1.MessageType,
+                cancellationToken: cancellationToken);
+
+            var properties = new BasicProperties
+            {
+                MessageId = integrationEvent.MessageId.ToString("D"),
+                ContentType = "application/json",
+                Type = RegistrationRequestedV1.MessageType,
+                Persistent = true
+            };
+
+            var payload = JsonSerializer.Serialize(
+                integrationEvent,
+                JsonSerializerOptions.Web);
+
+            await channel.BasicPublishAsync(
+                exchange: MessagingTopology.ExchangeName,
+                routingKey: RegistrationRequestedV1.MessageType,
+                mandatory: true,
+                basicProperties: properties,
+                body: Encoding.UTF8.GetBytes(payload),
+                cancellationToken: cancellationToken);
+        }
+
+        // The message was delivered, but SQL was not updated.
+        await using (var db = CreateDbContext())
+        {
+            var pendingMessage = await db.OutboxMessages
+                .AsNoTracking()
+                .SingleAsync(
+                    x => x.Id == integrationEvent.MessageId,
+                    cancellationToken);
+
+            Assert.Null(pendingMessage.PublishedAtUtc);
+        }
+
+        // Start the real publisher.
+        await using var provider = CreatePublisherProvider(rabbitMqUri.Port);
+
+        var publisher = provider.GetRequiredService<IHostedService>();
+
+        await publisher.StartAsync(cancellationToken);
+
+        try
+        {
+            var publishedMessage = await WaitForOutboxStateAsync(
+                integrationEvent.MessageId,
+                message => message.PublishedAtUtc is not null);
+
+            Assert.NotNull(publishedMessage.PublishedAtUtc);
+
+            // Read both deliveries from RabbitMQ.
+            await using var connection =
+                await connectionFactory.CreateConnectionAsync(
+                    cancellationToken);
+
+            await using var channel =
+                await connection.CreateChannelAsync(
+                    cancellationToken: cancellationToken);
+
+            var firstDelivery = await channel.BasicGetAsync(
+                MessagingTopology.RegistrationRequestsQueue,
+                autoAck: false,
+                cancellationToken: cancellationToken);
+
+            var secondDelivery = await channel.BasicGetAsync(
+                MessagingTopology.RegistrationRequestsQueue,
+                autoAck: false,
+                cancellationToken: cancellationToken);
+
+            Assert.NotNull(firstDelivery);
+            Assert.NotNull(secondDelivery);
+
+            var expectedMessageId =
+                integrationEvent.MessageId.ToString("D");
+
+            Assert.Equal(
+                expectedMessageId,
+                firstDelivery.BasicProperties.MessageId);
+
+            Assert.Equal(
+                expectedMessageId,
+                secondDelivery.BasicProperties.MessageId);
+
+            await channel.BasicAckAsync(
+                firstDelivery.DeliveryTag,
+                multiple: false,
+                cancellationToken: cancellationToken);
+
+            await channel.BasicAckAsync(
+                secondDelivery.DeliveryTag,
+                multiple: false,
+                cancellationToken: cancellationToken);
+        }
+        finally
+        {
+            await publisher.StopAsync(CancellationToken.None);
         }
     }
 }
