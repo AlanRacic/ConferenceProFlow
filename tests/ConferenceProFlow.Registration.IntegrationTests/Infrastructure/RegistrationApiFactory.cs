@@ -23,8 +23,9 @@ public sealed class RegistrationApiFactory : WebApplicationFactory<Program>
         {
             configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {
-                    ["ConnectionStrings:RegistrationDb"] = _connectionString
-                });
+                    ["ConnectionStrings:RegistrationDb"] = _connectionString,
+                    ["OutboxPublisher:Enabled"] = "false"
+            });
         });
     }
 }

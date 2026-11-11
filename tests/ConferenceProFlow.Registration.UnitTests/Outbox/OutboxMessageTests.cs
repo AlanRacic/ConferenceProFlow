@@ -115,4 +115,77 @@ public sealed class OutboxMessageTests
         Assert.NotNull(deserialized);
         Assert.Equal(integrationEvent, deserialized);
     }
+
+    [Fact]
+    public void MarkPublished_WithValidTimestamp_UpdatesPublishingState()
+    {
+        var occurredAt = DateTimeOffset.UtcNow;
+
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            occurredAt);
+
+        var publishedAt = occurredAt.AddSeconds(5);
+
+        message.MarkPublished(publishedAt);
+
+        Assert.Equal(publishedAt, message.PublishedAtUtc);
+        Assert.Equal(1, message.PublishAttempts);
+        Assert.Null(message.LastError);
+    }
+
+    [Fact]
+    public void RecordFailure_IncrementsAttemptsAndStoresError()
+    {
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            DateTimeOffset.UtcNow);
+
+        message.RecordFailure("RabbitMQ unavailable.");
+
+        Assert.Equal(1, message.PublishAttempts);
+        Assert.Null(message.PublishedAtUtc);
+        Assert.Equal("RabbitMQ unavailable.", message.LastError);
+    }
+
+    [Fact]
+    public void MarkPublished_AfterFailure_ClearsLastError()
+    {
+        var occurredAt = DateTimeOffset.UtcNow;
+
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            occurredAt);
+
+        message.RecordFailure("Connection failed.");
+
+        message.MarkPublished(occurredAt.AddSeconds(5));
+
+        Assert.Equal(2, message.PublishAttempts);
+        Assert.NotNull(message.PublishedAtUtc);
+        Assert.Null(message.LastError);
+    }
+
+    [Fact]
+    public void MarkPublished_Twice_ThrowsInvalidOperationException()
+    {
+        var occurredAt = DateTimeOffset.UtcNow;
+
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            occurredAt);
+
+        message.MarkPublished(occurredAt.AddSeconds(1));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            message.MarkPublished(occurredAt.AddSeconds(2)));
+    }
 }
