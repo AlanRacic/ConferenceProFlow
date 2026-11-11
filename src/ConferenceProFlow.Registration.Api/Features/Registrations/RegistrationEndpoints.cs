@@ -1,5 +1,8 @@
 ﻿using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
+using ConferenceProFlow.Registration.Api.Features.Registrations.Messages;
+using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using RegistrationEntity = ConferenceProFlow.Registration.Api.Domain.Entities.Registration;
 
 namespace ConferenceProFlow.Registration.Api.Features.Registrations;
@@ -56,15 +59,40 @@ public static class RegistrationEndpoints
                 });
             }
 
+            var occurredAtUtc = DateTimeOffset.UtcNow;
+
+            // Create the business registration.
             var registration = RegistrationEntity.Create(
                 request.ParticipantId,
                 request.SessionId,
-                DateTimeOffset.UtcNow);
+                occurredAtUtc);
 
+            // Create a versioned integration event.
+            var integrationEvent = new RegistrationRequestedV1(
+                Guid.NewGuid(),
+                registration.Id,
+                registration.SessionId,
+                occurredAtUtc);
+
+            // Serialize the event using the agreed JSON contract.
+            var payload = JsonSerializer.Serialize(
+                integrationEvent,
+                JsonSerializerOptions.Web);
+
+            // Create the corresponding Outbox record.
+            var outboxMessage = OutboxMessage.Create(
+                integrationEvent.MessageId,
+                RegistrationRequestedV1.MessageType,
+                payload,
+                occurredAtUtc);
+
+            // Track both records in the same DbContext.
             db.Registrations.Add(registration);
+            db.OutboxMessages.Add(outboxMessage);
 
             try
             {
+                // EF Core persists both records in one local transaction.
                 await db.SaveChangesAsync(ct);
             }
             catch (DbUpdateException ex)
