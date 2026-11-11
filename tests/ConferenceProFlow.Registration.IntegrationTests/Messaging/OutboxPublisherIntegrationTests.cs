@@ -651,4 +651,95 @@ public sealed class OutboxPublisherIntegrationTests : IAsyncLifetime
             await publisher.StopAsync(CancellationToken.None);
         }
     }
+
+    [Fact]
+    public async Task InvalidPayload_IsQuarantinedWithoutBlockingValidMessage()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var invalidMessageId = Guid.NewGuid();
+
+        var invalidMessage = OutboxMessage.Create(
+            invalidMessageId,
+            RegistrationRequestedV1.MessageType,
+            "{ invalid json",
+            DateTimeOffset.UtcNow);
+
+        await using (var db = CreateDbContext())
+        {
+            db.OutboxMessages.Add(invalidMessage);
+
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        // Create a valid message after the invalid message.
+        var validEvent = await CreateOutboxMessageAsync();
+
+        var rabbitMqUri = _rabbitMqFixture.ConnectionUri;
+
+        await using var provider = CreatePublisherProvider(rabbitMqUri.Port);
+
+        var publisher = provider.GetRequiredService<IHostedService>();
+
+        // Act
+        await publisher.StartAsync(cancellationToken);
+
+        try
+        {
+            var quarantinedMessage = await WaitForOutboxStateAsync(
+                invalidMessageId,
+                message => message.QuarantinedAtUtc is not null);
+
+            var publishedMessage = await WaitForOutboxStateAsync(
+                validEvent.MessageId,
+                message => message.PublishedAtUtc is not null);
+
+            // Assert: Invalid message was quarantined.
+            Assert.NotNull(quarantinedMessage.QuarantinedAtUtc);
+
+            Assert.Null(quarantinedMessage.PublishedAtUtc);
+
+            Assert.Null(quarantinedMessage.NextAttemptAtUtc);
+
+            Assert.NotNull(quarantinedMessage.LastError);
+
+            // Assert: Valid message was published.
+            Assert.NotNull(publishedMessage.PublishedAtUtc);
+
+            Assert.Null(publishedMessage.QuarantinedAtUtc);
+
+            // Verify that RabbitMQ contains the valid message.
+            var connectionFactory = new ConnectionFactory
+            {
+                Uri = rabbitMqUri
+            };
+
+            await using var connection =
+                await connectionFactory.CreateConnectionAsync(cancellationToken);
+
+            await using var channel =
+                await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+
+            var delivery = await channel.BasicGetAsync(
+                MessagingTopology.RegistrationRequestsQueue,
+                autoAck: false,
+                cancellationToken: cancellationToken);
+
+            Assert.NotNull(delivery);
+
+            Assert.Equal(
+                validEvent.MessageId.ToString("D"),
+                delivery.BasicProperties.MessageId);
+
+            await channel.BasicAckAsync(
+                delivery.DeliveryTag,
+                multiple: false,
+                cancellationToken: cancellationToken);
+        }
+        finally
+        {
+            await publisher.StopAsync(CancellationToken.None);
+        }
+    }
 }

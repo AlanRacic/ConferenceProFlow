@@ -252,4 +252,38 @@ public sealed class OutboxMessageTests
 
         Assert.Equal(2, message.PublishAttempts);
     }
+
+    [Fact]
+    public void Quarantine_SetsPermanentFailureState()
+    {
+        // Arrange
+        var occurredAtUtc = new DateTimeOffset(
+            2026, 11, 11, 10, 0, 0,
+            TimeSpan.Zero);
+
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            occurredAtUtc);
+
+        var quarantinedAtUtc = occurredAtUtc.AddMinutes(1);
+
+        // Act
+        message.Quarantine("Invalid message payload", quarantinedAtUtc);
+
+        // Assert
+        Assert.Equal(quarantinedAtUtc, message.QuarantinedAtUtc);
+
+        Assert.Null(message.PublishedAtUtc);
+
+        Assert.Null(message.NextAttemptAtUtc);
+
+        Assert.Equal(1, message.PublishAttempts);
+
+        Assert.Equal("Invalid message payload", message.LastError);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            message.MarkPublished(quarantinedAtUtc.AddMinutes(1)));
+    }
 }
