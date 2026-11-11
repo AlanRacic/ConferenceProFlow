@@ -147,8 +147,9 @@ public sealed class OutboxPublisherService : BackgroundService
 
                 await ResetRabbitMqAsync();
 
-                // Retry during a subsequent polling cycle.
-                return;
+                // Continue processing other messages in this batch.
+                // The failed message remains unpublished for a future retry.
+                continue;
             }
 
             // This runs only after successful broker confirmation.
