@@ -920,4 +920,65 @@ public sealed class RegistrationRequestConsumerIntegrationTests : IAsyncLifetime
 
         Assert.True(followingExists);
     }
+
+    [Fact]
+    public async Task ConsumerRestoresMissingBindingAndProcessesMessage()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var factory = new ConnectionFactory
+        {
+            Uri = _rabbitMqFixture.ConnectionUri
+        };
+
+        // Remove the binding created by the test fixture.
+        // The consumer must restore it during startup.
+        await using (var connection = await factory.CreateConnectionAsync(cancellationToken))
+        {
+            await using var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+
+            await channel.QueueUnbindAsync(
+                queue: MessagingTopology.RegistrationRequestsQueue,
+                exchange: MessagingTopology.ExchangeName,
+                routingKey: MessagingTopology.RegistrationRequestedRoutingKey,
+                cancellationToken: cancellationToken);
+        }
+
+        // Act
+        // Start the real consumer.
+        await StartConsumerAsync();
+
+        await WaitUntilAsync(async () =>
+            {
+                var state = await GetMainQueueStateAsync();
+
+                return state.Consumers == 1;
+            }, "Consumer did not register after restoring the binding.");
+
+        var message = CreateMessage();
+
+        await PublishMessageAsync(message);
+
+        await WaitForInboxMessageAsync(message.MessageId);
+
+        // Assert
+        await using var db = _sqlFixture.CreateDbContext();
+
+        var savedMessage = await db.InboxMessages
+            .AsNoTracking()
+            .SingleAsync(
+                x => x.Id == message.MessageId,
+                cancellationToken);
+
+        Assert.Equal(
+            message.RegistrationId,
+            savedMessage.RegistrationId);
+
+        Assert.Equal(
+            message.SessionId,
+            savedMessage.SessionId);
+
+        Assert.Null(savedMessage.ProcessedAtUtc);
+    }
 }
