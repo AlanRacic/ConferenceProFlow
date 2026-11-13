@@ -58,6 +58,38 @@ namespace ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence.Migrati
                         });
                 });
 
+            modelBuilder.Entity("ConferenceProFlow.Allocation.Worker.Domain.Entities.InboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("ProcessedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset>("ReceivedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("RegistrationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RegistrationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_InboxMessages_RegistrationId");
+
+                    b.HasIndex("ProcessedAtUtc", "ReceivedAtUtc")
+                        .HasDatabaseName("IX_InboxMessages_Processing");
+
+                    b.ToTable("InboxMessages", (string)null);
+                });
+
             modelBuilder.Entity("ConferenceProFlow.Allocation.Worker.Domain.Entities.SessionInventory", b =>
                 {
                     b.Property<Guid>("SessionId")
