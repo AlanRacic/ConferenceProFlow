@@ -101,12 +101,27 @@ public sealed class RegistrationRequestConsumerService : BackgroundService
                 confirmOptions,
                 stoppingToken);
 
-        // Match the durable queue already declared by Registration.
+        // Ensure the shared event exchange exists.
+        await consumerChannel.ExchangeDeclareAsync(
+            exchange: MessagingTopology.ExchangeName,
+            type: ExchangeType.Topic,
+            durable: true,
+            autoDelete: false,
+            cancellationToken: stoppingToken);
+
+        // Ensure the Allocation-owned queue exists.
         await consumerChannel.QueueDeclareAsync(
             queue: MessagingTopology.RegistrationRequestsQueue,
             durable: true,
             exclusive: false,
             autoDelete: false,
+            cancellationToken: stoppingToken);
+
+        // Ensure registration events are routed to this queue.
+        await consumerChannel.QueueBindAsync(
+            queue: MessagingTopology.RegistrationRequestsQueue,
+            exchange: MessagingTopology.ExchangeName,
+            routingKey: MessagingTopology.RegistrationRequestedRoutingKey,
             cancellationToken: stoppingToken);
 
         // A durable parking queue for messages requiring investigation.
