@@ -13,6 +13,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Data.SqlClient;
 
 using RabbitMQ.Client;
 
@@ -87,7 +88,7 @@ public sealed class RegistrationRequestConsumerIntegrationTests : IAsyncLifetime
         }
     }
 
-    private async Task StartConsumerAsync()
+    private async Task StartConsumerAsync(string? connectionStringOverride = null)
     {
         if (_consumerHost is not null)
         {
@@ -96,7 +97,8 @@ public sealed class RegistrationRequestConsumerIntegrationTests : IAsyncLifetime
 
         await using var db = _sqlFixture.CreateDbContext();
 
-        var connectionString = db.Database.GetConnectionString()
+        var connectionString = connectionStringOverride
+            ?? db.Database.GetConnectionString()
             ?? throw new InvalidOperationException("SQL Server test connection string is missing.");
 
         var rabbitMqFactory = new ConnectionFactory
@@ -711,5 +713,211 @@ public sealed class RegistrationRequestConsumerIntegrationTests : IAsyncLifetime
 
         Assert.Null(
             messages[0].ProcessedAtUtc);
+    }
+
+    [Fact]
+    public async Task SqlServerUnavailable_MessageIsRetriedAfterRecovery()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var message = CreateMessage();
+
+        // Obtain the valid test connection string.
+        await using var db = _sqlFixture.CreateDbContext();
+
+        var validConnectionString = db.Database.GetConnectionString()
+            ?? throw new InvalidOperationException("SQL Server test connection string is missing.");
+
+        // Simulate an unavailable SQL Server endpoint.
+        // The shared SQL Server Testcontainer remains running.
+        var unavailableConnectionString = new SqlConnectionStringBuilder(validConnectionString)
+            {
+                DataSource = "127.0.0.1,1",
+                ConnectTimeout = 2
+            }.ConnectionString;
+
+        // Start the real consumer with an unreachable SQL endpoint.
+        await StartConsumerAsync(unavailableConnectionString);
+
+        // Ensure that the consumer has subscribed before publishing.
+        await WaitUntilAsync(async () =>
+            {
+                var state = await GetMainQueueStateAsync();
+
+                return state.Consumers == 1;
+            }, "Consumer did not subscribe to RabbitMQ.");
+
+        // Act
+        await PublishMessageAsync(message);
+
+        // SQL persistence should fail.
+        // The consumer session should close without acknowledging.
+        await WaitUntilAsync(async () =>
+            {
+                var state = await GetMainQueueStateAsync();
+
+                return state.Ready == 1 &&
+                       state.Consumers == 0;
+            }, "Message was not returned to the queue after SQL failure.");
+
+        // Stop the consumer while the database is unavailable.
+        await StopConsumerAsync();
+
+        // Verify that no Inbox record was created.
+        await using (var verificationDb = _sqlFixture.CreateDbContext())
+        {
+            var exists = await verificationDb.InboxMessages
+                .AsNoTracking()
+                .AnyAsync(
+                    x => x.Id == message.MessageId,
+                    cancellationToken);
+
+            Assert.False(exists);
+        }
+
+        // Verify the message was previously delivered but not ACKed.
+        var factory = new ConnectionFactory
+        {
+            Uri = _rabbitMqFixture.ConnectionUri
+        };
+
+        await using (var connection = await factory.CreateConnectionAsync(cancellationToken))
+        {
+            await using var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+
+            var redelivery = await channel.BasicGetAsync(
+                MessagingTopology.RegistrationRequestsQueue,
+                autoAck: false,
+                cancellationToken: cancellationToken);
+
+            Assert.NotNull(redelivery);
+
+            Assert.Equal(
+                message.MessageId.ToString("D"),
+                redelivery.BasicProperties.MessageId);
+
+            Assert.True(redelivery.Redelivered);
+
+            // Return the message to the queue.
+            await channel.BasicNackAsync(
+                redelivery.DeliveryTag,
+                multiple: false,
+                requeue: true,
+                cancellationToken: cancellationToken);
+        }
+
+        // Recovery: restart the consumer with the valid SQL connection.
+        await StartConsumerAsync();
+
+        await WaitForInboxMessageAsync(message.MessageId);
+
+        // A following message verifies continued processing.
+        var followingMessage = CreateMessage();
+
+        await PublishMessageAsync(followingMessage);
+
+        await WaitForInboxMessageAsync(followingMessage.MessageId);
+
+        // Assert
+        await using var finalDb = _sqlFixture.CreateDbContext();
+
+        var savedMessages = await finalDb.InboxMessages
+            .AsNoTracking()
+            .Where(x => x.RegistrationId == message.RegistrationId)
+            .ToListAsync(cancellationToken);
+
+        Assert.Single(savedMessages);
+
+        Assert.Equal(message.MessageId, savedMessages[0].Id);
+
+        Assert.Null(savedMessages[0].ProcessedAtUtc);
+    }
+
+    [Fact]
+    public async Task RabbitMqBrokerAppRestart_ConsumerReconnectsAndContinuesProcessing()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        await StartConsumerAsync();
+
+        // Ensure the consumer is initially connected.
+        await WaitUntilAsync(async () =>
+            {
+                var state = await GetMainQueueStateAsync();
+
+                return state.Consumers == 1;
+            }, "Consumer did not establish the initial RabbitMQ subscription.");
+
+        // Remember the original RabbitMQ endpoint.
+        var originalConnectionUri = _rabbitMqFixture.ConnectionUri;
+
+        // Act
+        // Stop the RabbitMQ application without stopping its container.
+        await _rabbitMqFixture.StopBrokerAsync(cancellationToken);
+
+        // Restart the RabbitMQ application on the same endpoint.
+        await _rabbitMqFixture.StartBrokerAsync(cancellationToken);
+
+        // Verify that the container endpoint has not changed.
+        Assert.Equal(originalConnectionUri, _rabbitMqFixture.ConnectionUri);
+
+        // Wait for the existing Allocation Consumer to reconnect.
+        await WaitUntilAsync(async () =>
+            {
+                try
+                {
+                    var state = await GetMainQueueStateAsync();
+
+                    return state.Consumers == 1;
+                }
+                catch (RabbitMQ.Client.Exceptions.BrokerUnreachableException)
+                {
+                    // RabbitMQ may still be completing startup.
+                    return false;
+                }
+            }, "Consumer did not reconnect after RabbitMQ application restart.");
+
+        // Publish a new message after recovery.
+        var message = CreateMessage();
+
+        await PublishMessageAsync(message);
+
+        await WaitForInboxMessageAsync(message.MessageId);
+
+        // Publish another message to verify continued processing.
+        var followingMessage = CreateMessage();
+
+        await PublishMessageAsync(followingMessage);
+
+        await WaitForInboxMessageAsync(followingMessage.MessageId);
+
+        // Assert
+        await using var db = _sqlFixture.CreateDbContext();
+
+        var savedMessage = await db.InboxMessages
+            .AsNoTracking()
+            .SingleAsync(
+                x => x.Id == message.MessageId,
+                cancellationToken);
+
+        Assert.Equal(
+            message.RegistrationId,
+            savedMessage.RegistrationId);
+
+        Assert.Equal(
+            message.SessionId,
+            savedMessage.SessionId);
+
+        Assert.Null(savedMessage.ProcessedAtUtc);
+
+        var followingExists = await db.InboxMessages
+            .AsNoTracking()
+            .AnyAsync(
+                x => x.Id == followingMessage.MessageId,
+                cancellationToken);
+
+        Assert.True(followingExists);
     }
 }
