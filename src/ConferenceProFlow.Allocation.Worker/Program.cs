@@ -1,5 +1,6 @@
 using ConferenceProFlow.Allocation.Worker;
 using ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence;
+using ConferenceProFlow.Allocation.Worker.Messaging.Consumers;
 using ConferenceProFlow.Allocation.Worker.Messaging.Inbox;
 using Microsoft.EntityFrameworkCore;
 
@@ -12,7 +13,14 @@ builder.Services.AddDbContext<AllocationDbContext>(options => options.UseSqlServ
 
 builder.Services.AddScoped<InboxReceiveService>();
 
-builder.Services.AddHostedService<AllocationBackgroundService>();
+if (builder.Configuration.GetValue<bool>("RabbitMqConsumer:Enabled"))
+{
+    builder.Services.AddHostedService<RegistrationRequestConsumerService>();
+}
+else
+{
+    builder.Services.AddHostedService<AllocationBackgroundService>();
+}
 
 var host = builder.Build();
 
