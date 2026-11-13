@@ -14,12 +14,15 @@ public sealed class AllocationDbContext : DbContext
 
     public DbSet<AllocationEntity> Allocations => Set<AllocationEntity>();
 
+    public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
         ConfigureSessionInventories(modelBuilder);
         ConfigureAllocations(modelBuilder);
+        ConfigureInboxMessages(modelBuilder);
     }
 
     private static void ConfigureSessionInventories(ModelBuilder modelBuilder)
@@ -100,6 +103,44 @@ public sealed class AllocationDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(x => x.SessionId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+
+    private static void ConfigureInboxMessages(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<InboxMessage>(entity =>
+        {
+            entity.ToTable("InboxMessages");
+
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Id)
+                .ValueGeneratedNever();
+
+            entity.Property(x => x.RegistrationId)
+                .IsRequired();
+
+            entity.Property(x => x.SessionId)
+                .IsRequired();
+
+            entity.Property(x => x.OccurredAtUtc)
+                .IsRequired();
+
+            entity.Property(x => x.ReceivedAtUtc)
+                .IsRequired();
+
+            entity.Property(x => x.ProcessedAtUtc);
+
+            entity.HasIndex(x => x.RegistrationId)
+                .IsUnique()
+                .HasDatabaseName("UX_InboxMessages_RegistrationId");
+
+            entity.HasIndex(x => new
+            {
+                x.ProcessedAtUtc,
+                x.ReceivedAtUtc
+            })
+            .HasDatabaseName("IX_InboxMessages_Processing");
         });
     }
 }
