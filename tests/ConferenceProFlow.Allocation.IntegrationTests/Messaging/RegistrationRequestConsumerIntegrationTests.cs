@@ -234,6 +234,27 @@ public sealed class RegistrationRequestConsumerIntegrationTests : IAsyncLifetime
             }, $"Inbox message {messageId} was not persisted.");
     }
 
+    private async Task<(uint Ready, uint Consumers)> GetMainQueueStateAsync()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var factory = new ConnectionFactory
+        {
+            Uri = _rabbitMqFixture.ConnectionUri
+        };
+
+        await using var connection = await factory.CreateConnectionAsync(cancellationToken);
+
+        await using var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+
+        var queueInfo = await channel.QueueDeclarePassiveAsync(
+            MessagingTopology.RegistrationRequestsQueue,
+            cancellationToken);
+
+        return (queueInfo.MessageCount, queueInfo.ConsumerCount
+        );
+    }
+
     private async Task<(string? MessageId, string Payload, bool HasReason)>WaitForParkedMessageAsync()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
@@ -456,5 +477,239 @@ public sealed class RegistrationRequestConsumerIntegrationTests : IAsyncLifetime
         Assert.Single(savedMessages);
 
         Assert.Equal(original.SessionId, savedMessages[0].SessionId);
+    }
+
+    [Fact]
+    public async Task UnacknowledgedDelivery_IsRedeliveredAndStored()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var message = CreateMessage();
+
+        var factory = new ConnectionFactory
+        {
+            Uri = _rabbitMqFixture.ConnectionUri
+        };
+
+        await PublishMessageAsync(message);
+
+        // Simulate a consumer receiving the message without acknowledging it.
+        await using (var connection = await factory.CreateConnectionAsync(cancellationToken))
+        {
+            await using var channel = await connection.CreateChannelAsync(
+                    cancellationToken: cancellationToken);
+
+            var delivery = await channel.BasicGetAsync(
+                MessagingTopology.RegistrationRequestsQueue,
+                autoAck: false,
+                cancellationToken: cancellationToken);
+
+            Assert.NotNull(delivery);
+
+            Assert.Equal(message.MessageId.ToString("D"), delivery.BasicProperties.MessageId);
+
+            Assert.False(delivery.Redelivered);
+
+            // Intentionally do not ACK.
+        }
+
+        // Closing the connection should requeue the message.
+        await WaitUntilAsync(async () =>
+            {
+                var state = await GetMainQueueStateAsync();
+
+                return state.Ready == 1 && state.Consumers == 0;
+            }, "Unacknowledged message was not requeued.");
+
+        // Verify the broker marks the next delivery as redelivered.
+        await using (var connection = await factory.CreateConnectionAsync(cancellationToken))
+        {
+            await using var channel = await connection.CreateChannelAsync(
+                    cancellationToken: cancellationToken);
+
+            var redelivery = await channel.BasicGetAsync(
+                MessagingTopology.RegistrationRequestsQueue,
+                autoAck: false,
+                cancellationToken: cancellationToken);
+
+            Assert.NotNull(redelivery);
+
+            Assert.True(redelivery.Redelivered);
+
+            Assert.Equal(
+                message.MessageId.ToString("D"),
+                redelivery.BasicProperties.MessageId);
+
+            // Again, intentionally do not ACK.
+        }
+
+        await WaitUntilAsync(async () =>
+            {
+                var state = await GetMainQueueStateAsync();
+
+                return state.Ready == 1 &&
+                       state.Consumers == 0;
+            }, "Redelivered message was not returned to the queue.");
+
+        // Act
+        // Start the real Allocation Consumer.
+        var followingMessage = CreateMessage();
+
+        await PublishMessageAsync(followingMessage);
+
+        await StartConsumerAsync();
+
+        await WaitForInboxMessageAsync(followingMessage.MessageId);
+
+        // Assert
+        await using var db = _sqlFixture.CreateDbContext();
+
+        var savedMessage = await db.InboxMessages
+            .AsNoTracking()
+            .SingleAsync(x => x.Id == message.MessageId,
+                cancellationToken);
+
+        Assert.Equal(
+            message.RegistrationId,
+            savedMessage.RegistrationId);
+
+        Assert.Equal(
+            message.SessionId,
+            savedMessage.SessionId);
+
+        Assert.Null(savedMessage.ProcessedAtUtc);
+
+        var count = await db.InboxMessages
+            .CountAsync(
+                x => x.Id == message.MessageId,
+                cancellationToken);
+
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public async Task ConsumerRestart_ProcessesMessagesPublishedWhileStopped()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var firstMessage = CreateMessage();
+
+        await StartConsumerAsync();
+
+        await PublishMessageAsync(firstMessage);
+
+        await WaitForInboxMessageAsync(firstMessage.MessageId);
+
+        // Stop the Allocation Consumer.
+        await StopConsumerAsync();
+
+        // Publish a message while the consumer is stopped.
+        var pendingMessage = CreateMessage();
+
+        await PublishMessageAsync(pendingMessage);
+
+        // Verify that the message is waiting in RabbitMQ.
+        var queueState = await GetMainQueueStateAsync();
+
+        Assert.Equal(0u, queueState.Consumers);
+
+        Assert.True(queueState.Ready >= 1);
+
+        // Act
+        // Restart the real consumer.
+        await StartConsumerAsync();
+
+        await WaitForInboxMessageAsync(pendingMessage.MessageId);
+
+        // Publish another message to verify continued processing.
+        var followingMessage = CreateMessage();
+
+        await PublishMessageAsync(followingMessage);
+
+        await WaitForInboxMessageAsync(followingMessage.MessageId);
+
+        // Assert
+        await using var db = _sqlFixture.CreateDbContext();
+
+        var firstExists = await db.InboxMessages
+            .AnyAsync(
+                x => x.Id == firstMessage.MessageId,
+                cancellationToken);
+
+        var pendingExists = await db.InboxMessages
+            .AnyAsync(
+                x => x.Id == pendingMessage.MessageId,
+                cancellationToken);
+
+        var followingExists = await db.InboxMessages
+            .AnyAsync(
+                x => x.Id == followingMessage.MessageId,
+                cancellationToken);
+
+        Assert.True(firstExists);
+        Assert.True(pendingExists);
+        Assert.True(followingExists);
+
+        var pendingCount = await db.InboxMessages
+            .CountAsync(
+                x => x.Id == pendingMessage.MessageId,
+                cancellationToken);
+
+        Assert.Equal(1, pendingCount);
+    }
+
+    [Fact]
+    public async Task DuplicateAfterRestart_DoesNotCreateAnotherInboxRecord()
+    {
+        // Arrange
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var originalMessage = CreateMessage();
+
+        await StartConsumerAsync();
+
+        await PublishMessageAsync(originalMessage);
+
+        await WaitForInboxMessageAsync(originalMessage.MessageId);
+
+        // Stop the consumer after the message is persisted.
+        await StopConsumerAsync();
+
+        // Simulate a repeated delivery after the restart.
+        await PublishMessageAsync(originalMessage);
+
+        // A following message acts as a processing barrier.
+        var followingMessage = CreateMessage();
+
+        await PublishMessageAsync(followingMessage);
+
+        // Act
+        await StartConsumerAsync();
+
+        await WaitForInboxMessageAsync(followingMessage.MessageId);
+
+        // Assert
+        await using var db = _sqlFixture.CreateDbContext();
+
+        var messages = await db.InboxMessages
+            .AsNoTracking()
+            .Where(x =>
+                x.RegistrationId == originalMessage.RegistrationId)
+            .ToListAsync(cancellationToken);
+
+        Assert.Single(messages);
+
+        Assert.Equal(
+            originalMessage.MessageId,
+            messages[0].Id);
+
+        Assert.Equal(
+            originalMessage.SessionId,
+            messages[0].SessionId);
+
+        Assert.Null(
+            messages[0].ProcessedAtUtc);
     }
 }
