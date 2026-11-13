@@ -65,8 +65,8 @@ POST {{baseUrl}}/api/participants
 Content-Type: application/json
 
 {
-  "displayName": "Emily Carter",
-  "email": "emily.carter@example.com"
+  "displayName": "Olivia Bennett",
+  "email": "olivia.bennett@example.com"
 }
 
 
