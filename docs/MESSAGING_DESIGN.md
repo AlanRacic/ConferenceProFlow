@@ -8,7 +8,7 @@ The messaging architecture is designed around independent service ownership, rel
 
 The Registration service implements the Transactional Outbox pattern. Registration data and the corresponding outgoing event are committed to the same SQL Server database transaction. A background publisher subsequently sends pending Outbox messages to RabbitMQ.
 
-**Implementation status:** Registration-side Transactional Outbox publishing and Allocation-side RabbitMQ consumption with durable SQL Inbox persistence are implemented and tested. **Capacity-safe allocation, allocation-result events, and registration status reconciliation are not yet implemented.**
+**Implementation status (M2.5):** Registration-side Transactional Outbox, RabbitMQ publishing and consumption, durable Allocation SQL Inbox, capacity-aware allocation decisions, and automatic pending-Inbox processing are implemented and covered by automated component/integration tests. **Inventory is not yet provisioned automatically, and Allocation does not yet publish allocation-result events or reconcile Registration statuses.**
 
 ## 2. Service Responsibilities
 
@@ -31,7 +31,7 @@ The Allocation Worker owns:
 - Consumption and validation of `RegistrationRequestedV1` events.
 - Durable SQL Inbox storage, duplicate detection, and conflict handling.
 - Parking of invalid or conflicting RabbitMQ deliveries for investigation.
-- Future processing of received requests into allocation decisions.
+- Capacity-safe processing of pending SQL Inbox messages into Confirmed or Rejected allocations, with a background processor and SQL transaction consistency.
 
 Each service maintains its own SQL Server database. Neither service directly modifies the other service's database.
 
@@ -75,7 +75,7 @@ A message can reach RabbitMQ successfully even if the publisher crashes before p
 
 RabbitMQ publisher confirmation indicates broker acceptance of the publication, **not** that the Allocation Worker has processed the registration.
 
-The implemented Allocation consumer is **idempotent at the durable-receipt (Inbox) boundary**. SQL constraints prevent multiple Inbox rows for the same `MessageId` or `RegistrationId`. Business-level idempotency of capacity allocation remains a separate requirement for M2.5.
+The implemented Allocation consumer is **idempotent at the durable-receipt (Inbox) boundary**. SQL constraints prevent multiple Inbox rows for the same `MessageId` or `RegistrationId`. Business-level idempotency is implemented separately by `AllocationProcessingService`, SQL uniqueness on `Allocation.RegistrationId`, optimistic concurrency, and re-evaluation after conflicts.
 
 The consumer uses manual RabbitMQ acknowledgements: it acknowledges a valid request **after** persisting it or verifying an existing identical/compatible Inbox record. Acknowledging a message means that durable intake succeeded; it **does not mean a seat has been allocated**.
 
@@ -216,7 +216,7 @@ The `InboxReceiveService` persists an `InboxMessage` in the Allocation SQL Serve
 | `SessionId` | Requested session identifier |
 | `OccurredAtUtc` | Timestamp recorded by the Registration service |
 | `ReceivedAtUtc` | Timestamp when the request is durably accepted by Allocation |
-| `ProcessedAtUtc` | Remains `NULL` until future business allocation processing completes |
+| `ProcessedAtUtc` | `NULL` after durable intake; set after the allocation processor commits a business result |
 
 The database enforces uniqueness on `Id` and `RegistrationId`. `InboxReceiveService` first attempts an insert, then handles SQL Server unique-constraint violations (`2601`/`2627`) by reading the existing record. The results are:
 
@@ -228,7 +228,7 @@ The database enforces uniqueness on `Id` and `RegistrationId`. `InboxReceiveServ
 | `Conflict` | Inconsistent existing message or registration identity | Park, then ACK if parking is confirmed |
 | SQL or other unexpected error | Durable acceptance not established | No ACK; close/restart session and permit redelivery |
 
-A unique registration constraint prevents duplicate **Inbox receipt**, not duplicate **seat reservation**. The Inbox does not directly update `ReservedCount`, create allocations, or change Registration status.
+The unique Inbox registration constraint prevents duplicate **receipt**. The RabbitMQ consumer itself does not update `ReservedCount` or create allocations. A **separate** allocation processor handles those writes in the Allocation database. Neither component currently updates Registration status in the Registration database.
 
 ### Failure Handling and Recovery
 
@@ -240,20 +240,55 @@ Invalid JSON, invalid message metadata, and conflicting identities are preserved
 
 ### Eventual Consistency
 
-A new registration remains `Pending` after its Outbox event is published **and after its Inbox request is received**. The currently implemented path is:
+A registration remains `Pending` in the Registration database throughout the currently implemented flow, **even after Allocation makes a business decision**. The current sequence is:
 
 1. Registration API atomically persists a `Pending` registration and Outbox message.
 2. The Outbox publisher sends `registration.requested.v1` to RabbitMQ.
 3. Allocation consumer validates and durably records the request in `InboxMessages` and then ACKs it (or safely handles a duplicate).
-4. **Planned M2.5:** Allocation processes pending Inbox rows and makes a capacity-safe, idempotent allocation decision in its own database transaction.
-5. **Planned:** Allocation publishes an allocation-result integration event through an appropriate reliable mechanism.
-6. **Planned:** Registration consumes the result and changes the registration status to `Confirmed` or `Rejected`.
+4. `AllocationInboxProcessorService` polls for pending Inbox rows with a provisioned SessionInventory and delegates each eligible request to `AllocationProcessingService`.
+5. `AllocationProcessingService` enforces capacity and persists the Confirmed/Rejected Allocation, inventory change (when confirmed), and Inbox completion **atomically in the Allocation database**.
+6. **Not implemented yet:** Allocation publishes a reliable allocation-result event.
+7. **Not implemented yet:** Registration consumes the result and changes its registration state to `Confirmed` or `Rejected`.
 
-No step in the implemented intake flow confirms or rejects a seat allocation.
+RabbitMQ ACK confirms durable intake (step 3), not the later business allocation decision (step 5). `ProcessedAtUtc` records completion of the allocation processor, not AMQP delivery. No distributed transaction spans the Registration and Allocation databases.
+
+### M2.5 — Automated, Capacity-Safe Allocation Processing
+
+**This is a separate stage from RabbitMQ consumption.** The Allocation Worker can host both `RegistrationRequestConsumerService` (message intake) and `AllocationInboxProcessorService` (SQL Inbox business processing) at the same time. Both are registered conditionally through `RabbitMqConsumer:Enabled` and `AllocationInboxProcessor:Enabled`.
+
+`AllocationInboxProcessorService` polls eligible Inbox rows (`ProcessedAtUtc IS NULL` and an existing `SessionInventory` for the same SessionId), orders by receipt time and message ID, and processes up to a configured batch size per poll. Each request uses a dedicated DI scope / EF Core DbContext. A missing inventory does not block other, ready sessions; the pending request becomes eligible once inventory is provisioned.
+
+`AllocationProcessingService` evaluates each Inbox request:
+
+- If the Inbox record does not exist, return `NotFound`; if already processed, return `AlreadyProcessed`.
+- If an Allocation already exists for the same registration/session, do **not** reserve another seat; complete the pending Inbox record if necessary (`ExistingAllocation`). A conflicting session mapping is an error.
+- If no `SessionInventory` exists, return `WaitingForInventory` and keep the Inbox pending. No default capacity is invented and the registration is not rejected solely for lacking inventory.
+- If `TryReserveSeat()` succeeds, persist a **Confirmed** Allocation and increment `ReservedCount`.
+- If capacity is exhausted, persist a **Rejected** Allocation with reason `Session capacity reached.` without incrementing `ReservedCount`.
+- Set `InboxMessage.ProcessedAtUtc` only as part of successful persistence of that business decision.
+
+The inventory update, Allocation insert, and Inbox completion are tracked in **one AllocationDbContext** and written in a single EF Core `SaveChangesAsync` transaction. SQL Server constraints enforce `0 <= ReservedCount <= Capacity`, and `Allocation.RegistrationId` is unique. `SessionInventory.RowVersion` detects stale concurrent inventory updates. A bounded retry clears tracked state and reevaluates the whole decision after recognized concurrency conflicts, duplicate-key races, or SQL Server deadlocks; it does not blindly repeat a stale update.
+
+The polling worker runs sequentially within **one instance**. Its configurable batch size is not parallel worker concurrency. Separate SQL concurrency tests exercise contention across independent DbContexts, including 100 competing registrations for 10 seats. Those tests demonstrate tested safety conditions, not a guarantee of scale-out orchestration under every workload.
+
+The BackgroundService's `FailureRetrySeconds` cooldown is **in memory**, so it resets after Worker restart. Failures leave the Inbox record durable and eligible for later retry. Its query excludes rows without inventory rather than repeatedly failing them.
+
+Configuration defaults (in Worker `appsettings.json`):
+
+```json
+"AllocationInboxProcessor": {
+  "Enabled": false,
+  "PollIntervalSeconds": 5,
+  "BatchSize": 20,
+  "FailureRetrySeconds": 30
+}
+```
+
+For the local end-to-end demonstration, enable the processor and provision inventory using `docs/ALLOCATION_E2E_SEED.sql` for a newly created Registration session. This is **development-only setup**, not automated cross-service inventory synchronization. See `docs/ALLOCATION_E2E_DEMO.md` and `docs/ALLOCATION_E2E.http`.
 
 ## 9. Automated Testing
 
-Unit tests cover Outbox creation and state changes, retry policy, payload validation, Inbox entity invariants, and consumer-side JSON parsing and validation.
+Unit tests cover Outbox creation and state changes, retry policy, payload validation, Inbox entity invariants/processing completion, SessionInventory capacity rules, and consumer-side JSON parsing and validation.
 
 ### Registration Integration Tests
 
@@ -283,6 +318,20 @@ The consumer integration test suite uses the real `RegistrationRequestConsumerSe
 - Restoration of a missing queue binding at consumer startup.
 
 The broker application restart test keeps the container and published endpoint stable; it does not simulate a deployment with a changing broker address. The test suite does not establish exactly-once business execution or cover every network timing/fault combination.
+
+### Allocation Business and Background Processing Tests
+
+SQL Server Testcontainers tests additionally verify:
+
+- Confirmed and Rejected allocation decisions, matching inventory updates, and atomic Inbox completion.
+- Pending requests awaiting inventory, and automatic processing after inventory is created.
+- Duplicate/sequential business processing and existing-allocation recovery without reserving a second seat.
+- SQL Server `RowVersion` conflicts, rollback of failed transactional writes, and fresh-state retry.
+- Concurrent attempts to process the same Inbox message.
+- 100 requests competing for 10 seats with an eight-operation concurrency cap: 10 confirmed, 90 rejected, with capacity intact.
+- The Inbox polling BackgroundService: automatic allocation, batch processing, delayed inventory provisioning, restart recovery, and per-message failure isolation.
+
+A separate **manual cross-service** demonstration is documented in `docs/ALLOCATION_E2E_DEMO.md`. The current automated suites do not claim a single full-system HTTP → RabbitMQ → SQL business E2E test.
 
 ## 10. Operational Visibility
 
@@ -324,7 +373,18 @@ WHERE ProcessedAtUtc IS NULL
 ORDER BY ReceivedAtUtc ASC;
 ```
 
-The RabbitMQ Management UI exposes the request and parking queue message counts and active consumer information. These views are diagnostic; a `Ready = 0` queue does not by itself prove a business allocation has occurred.
+To inspect completed allocation decisions in the Allocation database:
+
+```sql
+SELECT a.RegistrationId, a.SessionId, a.Status, a.RejectionReason,
+       i.Capacity, i.ReservedCount, m.ProcessedAtUtc
+FROM dbo.Allocations AS a
+INNER JOIN dbo.SessionInventories AS i ON i.SessionId = a.SessionId
+LEFT JOIN dbo.InboxMessages AS m ON m.RegistrationId = a.RegistrationId
+ORDER BY a.CreatedAtUtc DESC;
+```
+
+`Allocation.Status = 1` means Confirmed and `2` means Rejected. These are **Allocation-side decisions**; Registration-side status still remains Pending (`0`). The RabbitMQ Management UI exposes request/parking queue counts and active consumers. A `Ready = 0` queue only reflects messaging state, not proof of successful business allocation.
 
 There is not yet a dedicated production monitoring dashboard, alerting policy, audited quarantine/parking recovery operation, or authenticated administrative replay tooling.
 
@@ -339,7 +399,9 @@ There is not yet a dedicated production monitoring dashboard, alerting policy, a
 - Parking publication followed by original ACK is not atomic; duplicate parked messages may occur on crashes.
 - Consumer uses prefetch 1 and application-managed reconnect. The current tests do not cover every mid-delivery network partition or multi-instance load scenario.
 - There is no dedicated production metrics/alerting setup or administrative monitoring dashboard.
-- Incoming requests are stored but **not yet processed into capacity-safe allocations**. `InboxMessage.ProcessedAtUtc` remains `NULL`.
+- Pending Inbox messages **are automatically processed into capacity-safe decisions** only when the Allocation Inbox processor is enabled **and** a matching SessionInventory exists. Inventory provisioning/synchronization is not yet automated; a development-only SQL seed is available for the demo.
+- Polling and in-memory error cooldowns are scoped to one Worker instance; no durable claims/leases coordinate multiple allocation processor replicas.
+- The local end-to-end demo is manual; no single automated cross-service HTTP → RabbitMQ → allocation regression scenario is currently claimed.
 - Allocation-result event publishing and Registration status reconciliation are not implemented.
 - The Registration API has additional development-stage access-control/session-publication limitations documented elsewhere.
 
@@ -347,10 +409,10 @@ The project is **production-aware**, with selected production-ready engineering 
 
 ## 12. Next Steps
 
-1. Implement **M2.5 concurrency-safe Inbox processing**: provision/resolve session inventory, enforce capacity, and atomically persist the allocation decision and Inbox processing state.
-2. Preserve idempotent business results across redelivery and application restarts.
-3. Publish versioned allocation-result events using reliable delivery and process them in Registration to update `Pending` registrations.
-4. Add end-to-end business workflow tests and document inventory provisioning and session-publication rules.
-5. Revisit operating procedures for parked and quarantined messages, metrics, alerting, and scale-out coordination when justified by deployment requirements.
+1. Introduce explicit, service-owned session inventory provisioning synchronized from Registration without cross-database writes by the application.
+2. Publish versioned allocation-result events reliably from Allocation and process them in Registration to update `Pending` registrations.
+3. Add an automated full-system HTTP → Outbox → RabbitMQ → Inbox → Allocation end-to-end regression test.
+4. Enforce session-publication/eligibility rules, authentication, authorization, and production-grade secret management.
+5. Consider durable work claims, replay tooling, metrics, alerting, and multiple-replica coordination when justified by real deployment requirements.
 
 The architecture prioritizes data consistency, explicit failure handling, testability, and reproducible local development without paid infrastructure.
