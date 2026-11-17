@@ -15,11 +15,24 @@ builder.Services.AddDbContext<AllocationDbContext>(options => options.UseSqlServ
 builder.Services.AddScoped<InboxReceiveService>();
 builder.Services.AddScoped<AllocationProcessingService>();
 
-if (builder.Configuration.GetValue<bool>("RabbitMqConsumer:Enabled"))
+builder.Services.Configure<AllocationInboxProcessorOptions>(
+    builder.Configuration.GetSection(AllocationInboxProcessorOptions.SectionName));
+
+var rabbitMqConsumerEnabled = builder.Configuration.GetValue<bool>("RabbitMqConsumer:Enabled");
+
+var inboxProcessorEnabled = builder.Configuration.GetValue<bool>("AllocationInboxProcessor:Enabled");
+
+if (rabbitMqConsumerEnabled)
 {
     builder.Services.AddHostedService<RegistrationRequestConsumerService>();
 }
-else
+
+if (inboxProcessorEnabled)
+{
+    builder.Services.AddHostedService<AllocationInboxProcessorService>();
+}
+
+if (!rabbitMqConsumerEnabled && !inboxProcessorEnabled)
 {
     builder.Services.AddHostedService<AllocationBackgroundService>();
 }
