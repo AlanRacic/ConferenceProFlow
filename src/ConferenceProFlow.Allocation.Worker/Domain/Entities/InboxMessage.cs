@@ -61,4 +61,19 @@ public sealed class InboxMessage
             ProcessedAtUtc = null
         };
     }
+
+    public void MarkProcessed(DateTimeOffset processedAtUtc)
+    {
+        if (processedAtUtc == default || processedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("ProcessedAtUtc must be a valid UTC timestamp.", nameof(processedAtUtc));
+        }
+
+        if (ProcessedAtUtc is not null)
+        {
+            throw new InvalidOperationException("Inbox message has already been processed.");
+        }
+
+        ProcessedAtUtc = processedAtUtc;
+    }
 }

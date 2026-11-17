@@ -1,6 +1,8 @@
 <Solution>
   <Folder Name="/Solution Items/">
     <File Path="docs/ARCHITECTURE.md" />
+    <File Path="docs/LOCAL_DEVELOPMENT.md" />
+    <File Path="docs/MESSAGING_DESIGN.md" />
     <File Path="docs/PROJECT_CHARTER.md" />
     <File Path="LICENSE.txt" />
     <File Path="README.md" />

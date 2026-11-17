@@ -1,0 +1,102 @@
+@baseUrl = https://localhost:7217
+
+# ConferenceProFlow — M2.5 end-to-end demonstration
+# Run these requests from top to bottom, stopping AFTER demoCreateSession
+# to run docs/ALLOCATION_E2E_SEED.sql in ConferenceProFlowAllocation.
+# Start both the Registration API and Allocation Worker before registration requests.
+# IMPORTANT: For a second run, create a NEW session and use NEW participant email addresses.
+# STOP after demoCreateSession succeeds. Copy its response body `id` into @SessionIdText in
+# docs/ALLOCATION_E2E_SEED.sql, then execute the SQL script against the Allocation database.
+# The script creates capacity = 2 and ReservedCount = 0 for this session.
+# Only after seeding, continue with requests 3 through 8.
+
+### 1. Create a dedicated demo conference
+# @name demoCreateConference
+POST {{baseUrl}}/api/conferences
+Content-Type: application/json
+
+{
+  "name": "ConferenceProFlow Allocation Demo 2027",
+  "startsAtUtc": "2027-06-01T08:00:00Z",
+  "endsAtUtc": "2027-06-02T18:00:00Z"
+}
+
+### 2. Create a demo session (its ID is needed to seed Allocation inventory)
+# @name demoCreateSession
+POST {{baseUrl}}/api/conferences/{{demoCreateConference.response.body.$.id}}/sessions
+Content-Type: application/json
+
+{
+  "title": "Concurrency-Safe Seat Allocation",
+  "startsAtUtc": "2027-06-01T10:00:00Z",
+  "endsAtUtc": "2027-06-01T11:30:00Z"
+}
+
+### 3. Create first demo participant
+# @name demoCreateParticipant1
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Nora Ellis",
+  "email": "nora.ellis.demo2027a@example.com"
+}
+
+### 4. Register first participant for the demo session
+# @name demoCreateRegistration1
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{demoCreateParticipant1.response.body.$.id}}",
+  "sessionId": "{{demoCreateSession.response.body.$.id}}"
+}
+
+### 5. Create second demo participant
+# @name demoCreateParticipant2
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Ethan Brooks",
+  "email": "ethan.brooks.demo2027a@example.com"
+}
+
+### 6. Register second participant for the same session
+# @name demoCreateRegistration2
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{demoCreateParticipant2.response.body.$.id}}",
+  "sessionId": "{{demoCreateSession.response.body.$.id}}"
+}
+
+### 7. Create third demo participant
+# @name demoCreateParticipant3
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Maya Chen",
+  "email": "maya.chen.demo2027a@example.com"
+}
+
+### 8. Register third participant (capacity was only 2)
+# @name demoCreateRegistration3
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{demoCreateParticipant3.response.body.$.id}}",
+  "sessionId": "{{demoCreateSession.response.body.$.id}}"
+}
+
+### 9. Inspect the original Registration-side status (still Pending in M2.5)
+GET {{baseUrl}}/api/registrations/{{demoCreateRegistration1.response.body.$.id}}
+
+### 10. Inspect the other two Registration-side statuses
+GET {{baseUrl}}/api/registrations/{{demoCreateRegistration2.response.body.$.id}}
+
+### 11. Inspect the final Registration-side status
+GET {{baseUrl}}/api/registrations/{{demoCreateRegistration3.response.body.$.id}}

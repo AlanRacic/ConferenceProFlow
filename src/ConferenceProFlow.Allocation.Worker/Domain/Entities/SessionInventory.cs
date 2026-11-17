@@ -17,7 +17,10 @@ public sealed class SessionInventory
 
     public byte[] RowVersion { get; private set; } = [];
 
-    public static SessionInventory Create(Guid sessionId, int capacity, DateTimeOffset createdAtUtc)
+    public static SessionInventory Create(
+        Guid sessionId,
+        int capacity,
+        DateTimeOffset createdAtUtc)
     {
         if (sessionId == Guid.Empty)
         {
@@ -41,5 +44,17 @@ public sealed class SessionInventory
             ReservedCount = 0,
             CreatedAtUtc = createdAtUtc
         };
+    }
+
+    public bool TryReserveSeat()
+    {
+        if (ReservedCount >= Capacity)
+        {
+            return false;
+        }
+
+        ReservedCount++;
+
+        return true;
     }
 }
