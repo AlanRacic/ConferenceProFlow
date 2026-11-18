@@ -1,4 +1,5 @@
 ﻿using ConferenceProFlow.Allocation.Worker.Domain.Entities;
+using ConferenceProFlow.Allocation.Worker.Messaging.Outbox;
 using AllocationEntity = ConferenceProFlow.Allocation.Worker.Domain.Entities.Allocation;
 using Microsoft.EntityFrameworkCore;
 
@@ -11,10 +12,9 @@ public sealed class AllocationDbContext : DbContext
     }
 
     public DbSet<SessionInventory> SessionInventories => Set<SessionInventory>();
-
     public DbSet<AllocationEntity> Allocations => Set<AllocationEntity>();
-
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
+    public DbSet<AllocationOutboxMessage> AllocationOutboxMessages => Set<AllocationOutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -23,6 +23,7 @@ public sealed class AllocationDbContext : DbContext
         ConfigureSessionInventories(modelBuilder);
         ConfigureAllocations(modelBuilder);
         ConfigureInboxMessages(modelBuilder);
+        ConfigureAllocationOutboxMessages(modelBuilder);
     }
 
     private static void ConfigureSessionInventories(ModelBuilder modelBuilder)
@@ -34,7 +35,6 @@ public sealed class AllocationDbContext : DbContext
                 table.HasCheckConstraint(
                     "CK_SessionInventories_Capacity",
                     "[Capacity] > 0");
-
                 table.HasCheckConstraint(
                     "CK_SessionInventories_ReservedCount",
                     "[ReservedCount] >= 0 AND [ReservedCount] <= [Capacity]");
@@ -68,7 +68,6 @@ public sealed class AllocationDbContext : DbContext
                 table.HasCheckConstraint(
                     "CK_Allocations_Status",
                     "[Status] IN (1, 2)");
-
                 table.HasCheckConstraint(
                     "CK_Allocations_RejectionReason",
                     "([Status] = 1 AND [RejectionReason] IS NULL) OR " +
@@ -141,6 +140,68 @@ public sealed class AllocationDbContext : DbContext
                 x.ReceivedAtUtc
             })
             .HasDatabaseName("IX_InboxMessages_Processing");
+        });
+    }
+
+    private static void ConfigureAllocationOutboxMessages(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<AllocationOutboxMessage>(entity =>
+        {
+            entity.ToTable("AllocationOutboxMessages", table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_AllocationOutboxMessages_PublishAttempts",
+                    "[PublishAttempts] >= 0");
+            });
+
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Id)
+                .ValueGeneratedNever();
+
+            entity.Property(x => x.AllocationId)
+                .IsRequired();
+
+            entity.Property(x => x.MessageType)
+                .HasMaxLength(160)
+                .IsRequired();
+
+            entity.Property(x => x.Payload)
+                .HasColumnType("nvarchar(max)")
+                .IsRequired();
+
+            entity.Property(x => x.OccurredAtUtc)
+                .IsRequired();
+
+            entity.Property(x => x.PublishedAtUtc);
+
+            entity.Property(x => x.PublishAttempts)
+                .IsRequired();
+
+            entity.Property(x => x.LastError)
+                .HasMaxLength(2000);
+
+            entity.Property(x => x.NextAttemptAtUtc);
+            entity.Property(x => x.QuarantinedAtUtc);
+
+            // Only one logical result event may be created for a given allocation.
+            entity.HasIndex(x => x.AllocationId)
+                .IsUnique()
+                .HasDatabaseName("UX_AllocationOutboxMessages_AllocationId");
+
+            entity.HasOne<AllocationEntity>()
+                .WithMany()
+                .HasForeignKey(x => x.AllocationId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasIndex(x => new
+            {
+                x.PublishedAtUtc,
+                x.QuarantinedAtUtc,
+                x.NextAttemptAtUtc,
+                x.OccurredAtUtc
+            })
+            .HasDatabaseName("IX_AllocationOutboxMessages_PublishStatus");
         });
     }
 }
