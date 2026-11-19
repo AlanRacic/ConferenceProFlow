@@ -8,44 +8,58 @@ ConferenceProFlow is an incremental, production-aware backend portfolio project 
 
 It is intentionally designed to run on a developer machine with Docker and .NET **without paid cloud services**. The platform is **not yet a production-ready public service**; implementation boundaries and remaining work are documented explicitly.
 
-## Implemented Architecture (M2.5)
+## Implemented Architecture (M2.6)
 
 ```text
 Registration API (.NET 10)
   |-- RegistrationDb (SQL Server)
-  |     |-- Registrations (initially Pending)
-  |     +-- OutboxMessages (same local transaction)
+  |     |-- Registrations (Pending -> Confirmed / Rejected)
+  |     |-- OutboxMessages (registration-request events)
+  |     +-- AllocationResultInboxMessages (result-event receipts)
   |-- OutboxPublisherService
-  v
-RabbitMQ (durable topic exchange, registration-request queue)
-  v
-Allocation Worker (.NET 10 Generic Host)
-  |-- RegistrationRequestConsumerService
-  |     +-- SQL InboxMessage + manual RabbitMQ ACK after durable receipt
-  |-- AllocationInboxProcessorService
-  |     +-- AllocationProcessingService
-  |           |-- SessionInventory capacity / RowVersion
-  |           |-- Allocation Confirmed or Rejected
-  |           +-- atomic inventory + allocation + Inbox completion
-  v
-AllocationDb (independently owned SQL Server database)
+  |-- AllocationResultConsumerService
+  |     +-- AllocationResultReconciliationService
+  |            +-- Registration status + result Inbox committed together
+  |
+  | registration.requested.v1             ^ allocation.decided.v1
+  v                                       |
+RabbitMQ (durable topic exchange and service-owned queues)
+  |                                       ^
+  v                                       |
+Allocation Worker (.NET 10 Generic Host)  |
+  |-- RegistrationRequestConsumerService  |
+  |     +-- durable SQL Inbox + ACK        |
+  |-- AllocationInboxProcessorService     |
+  |     +-- AllocationProcessingService   |
+  |           +-- capacity-safe Confirmed / Rejected decision
+  |           +-- inventory + allocation + Inbox + result Outbox atomically
+  |-- Allocation result Outbox publisher (BackgroundService)
+  |     +-- publish allocation.decided.v1 after commit
+  +---------------------------------------+
+
+AllocationDb (separately owned SQL Server database)
+  |-- SessionInventories (Capacity / ReservedCount / RowVersion)
+  |-- InboxMessages
+  |-- Allocations
+  +-- Allocation result Outbox (durable events)
 ```
 
-The Registration and Allocation services **do not access each other's databases**. RabbitMQ messages follow at-least-once delivery semantics, so both Inbox intake and business allocation are designed to be idempotent. Publisher confirmation and consumer ACK are distinct from the eventual business decision.
+The two services **own separate databases** and communicate using versioned RabbitMQ integration events. No distributed SQL transaction spans both databases. Registrations are initially `Pending` and are later reconciled to `Confirmed` or `Rejected` (eventual consistency). Delivery is **at least once**, not exactly once; SQL constraints and idempotent handlers protect against repeated business processing. Publisher confirmation, consumer ACK and final business outcome mean different things.
 
 ### Currently implemented
 
-- ASP.NET Core Minimal API for conferences, sessions, participants and registration requests.
-- SQL Server / EF Core with version-controlled migrations and constraints.
-- Transactional Outbox with publisher confirms, retry scheduling and payload quarantine.
-- RabbitMQ direct client integration, durable topology and consumer-side recovery.
-- Durable SQL Inbox, validation, duplicate/conflict handling, manual ACK and a parking queue.
-- Capacity-aware Allocation decisions using domain rules, SQL transactions, `RowVersion` optimistic concurrency, unique indexes and bounded retries.
-- A background SQL Inbox processor for eligible pending requests; restart recovery and failure isolation.
-- Automated xUnit v3 unit and Testcontainers SQL Server/RabbitMQ integration tests, including concurrent seat allocation scenarios.
-- Local Docker Compose for SQL Server 2022 and RabbitMQ; GitHub Actions build and test workflow.
+- ASP.NET Core Minimal API for conferences, sessions, participants and registrations.
+- SQL Server / EF Core 10 with migrations, relational constraints and unique indexes.
+- Registration-side Transactional Outbox for `RegistrationRequestedV1` and Allocation-side Transactional Outbox for `AllocationDecidedV1`.
+- RabbitMQ direct client integration (`RabbitMQ.Client` 7.x) with durable topology, persistent messages, publisher confirmations, manual consumer ACKs and recovery handling.
+- Durable SQL Inbox processing on both sides, duplicate/conflict detection, and service-owned parking queues for invalid/conflicting deliveries.
+- Capacity-aware Allocation decisions with SQL transaction consistency, `RowVersion` optimistic concurrency and bounded retries.
+- A background Allocation Inbox processor and an Allocation result Outbox publisher.
+- Registration-side result consumer and reconciliation service that atomically persist the final status and result Inbox receipt.
+- Automated xUnit v3 unit tests and SQL Server/RabbitMQ Testcontainers integration tests, including recovery and concurrency scenarios.
+- Local Docker Compose for SQL Server 2022 and RabbitMQ; GitHub Actions build/test workflow.
 
-**Currently important distinction:** Allocation can confirm/reject **in its own database**, but the corresponding Registration record remains **Pending**. Allocation-result events and Registration-side status reconciliation are not yet implemented.
+**M2.6 verified locally:** A session with capacity 2 received three registrations; two became `Confirmed`, one `Rejected`, and Registration/Allocation databases agreed on the results. A separate recovery exercise showed a registration remained `Pending` while the Allocation Worker was stopped and completed after the Worker restarted. This is a targeted manual demonstration, not exhaustive failure testing.
 
 ## Technology Stack
 
@@ -73,14 +87,14 @@ Kafka, Kubernetes, distributed observability and performance-testing tools are *
    docker compose --env-file .env -f infrastructure/compose.yaml up -d
    ```
 
-5. Run the Registration API (HTTPS profile) and Allocation Worker (Development profile) in two terminals or through Visual Studio. Enable `OutboxPublisher:Enabled`, `RabbitMqConsumer:Enabled` and `AllocationInboxProcessor:Enabled` in the appropriate development User Secrets.
-6. Follow the [end-to-end allocation demo](docs/ALLOCATION_E2E_DEMO.md) to create a conference session, provision **development-only** inventory, submit three registrations and verify capacity-safe Allocation results.
+5. Run the Registration API (HTTPS profile) and Allocation Worker (Development profile) in two terminals or through Visual Studio. In the Registration API User Secrets enable `OutboxPublisher:Enabled` and `AllocationResultConsumer:Enabled`; in the Allocation Worker User Secrets enable `RabbitMqConsumer:Enabled`, `AllocationInboxProcessor:Enabled` and `AllocationOutboxPublisher:Enabled`. These services also require each application's existing database/RabbitMQ settings.
+6. Follow the [end-to-end allocation demo](docs/ALLOCATION_E2E_DEMO.md): create a conference and session, provision **development-only** inventory, submit three registrations, then verify the final statuses in the Registration API and both databases.
 
 The Registration API HTTPS development endpoint is `https://localhost:7217`. Its example requests are in [`docs/REGISTRATION_API.http`](docs/REGISTRATION_API.http). The OpenAPI JSON is exposed in Development at `/openapi/v1.json`; interactive Swagger UI is not configured.
 
 ### End-to-End Demo
 
-The [M2.5 demo guide](docs/ALLOCATION_E2E_DEMO.md) contains a reproducible path with two seats and three registration requests, plus SQL queries verifying **two Confirmed and one Rejected Allocation** without overbooking. The companion [HTTP requests](docs/ALLOCATION_E2E.http) and [guarded SQL seed](docs/ALLOCATION_E2E_SEED.sql) avoid hand-assembling HTTP requests or guessing SQL table structure.
+The [end-to-end demo guide](docs/ALLOCATION_E2E_DEMO.md) uses two seats and three registration requests, then verifies **two Confirmed and one Rejected Registration**, corresponding Allocation decisions, and no overbooking. The [HTTP requests](docs/ALLOCATION_E2E.http) reference IDs from prior responses, reducing manual GUID entry; a [guarded SQL seed](docs/ALLOCATION_E2E_SEED.sql) provisions inventory for the demo. The final Registration GET responses and SQL verification illustrate eventual consistency.
 
 The SQL seed is **for local development only**. Automated production synchronization of session inventory does not yet exist.
 
@@ -124,22 +138,22 @@ The current GitHub Actions workflow runs restore, Release build, Docker availabi
 - [Domain Model](docs/DOMAIN_MODEL.md)
 - [Messaging Design and Reliability](docs/MESSAGING_DESIGN.md)
 - [Local Development Guide](docs/LOCAL_DEVELOPMENT.md)
-- [M2.5 End-to-End Allocation Demo](docs/ALLOCATION_E2E_DEMO.md)
+- [M2.6 End-to-End Allocation and Reconciliation Demo](docs/ALLOCATION_E2E_DEMO.md)
 - [Registration API HTTP Examples](docs/REGISTRATION_API.http)
 
 ## Project Status and Next Steps
 
-**M1 — Registration API: Complete. M2.3–M2.4 — Outbox, RabbitMQ and SQL Inbox: Complete. M2.5 — Concurrency-safe business allocation and background processing: implemented, pending final review and PR merge.**
+**M1 — Registration API: Complete. M2.3–M2.4 — Registration Outbox, RabbitMQ and Allocation SQL Inbox: Complete. M2.5 — Capacity-safe allocation: implemented. M2.6 — Allocation result publishing and Registration reconciliation: implemented and locally verified; final documentation review, full Release regression and CI/PR merge remain part of milestone completion.**
 
-Planned improvements include reliable Allocation-result events and Registration-side status updates; automatic inventory provisioning; session-publication/registration eligibility rules; access control; operational tooling, instrumentation, and eventual additional infrastructure only where justified.
+Potential future work includes automatic session inventory provisioning; publication/registration eligibility rules; authentication/authorization; operational replay and monitoring; multi-replica coordination; and additional load/failure testing where justified.
 
 ### Explicit Current Limitations
 
-- No automated provisioning of `SessionInventory` from a newly created Registration session (the demo uses a guarded local SQL script).
-- No Allocation-result message and no Registration status reconciliation; the Registration database still reports Pending.
-- Authentication and authorization are not implemented; Registration currently accepts some unpublished-session requests for development/testing.
-- RabbitMQ delivery is at least once, **not exactly once**. Parking queue requires manual investigation; there is no audited replay interface.
-- The Outbox publisher and SQL Inbox processor do not yet coordinate multiple active replicas through durable row claims or leases. Transient Inbox failure cooldown is in memory.
-- Operational alerting, production secrets management, performance qualification, and full-system automated E2E tests remain future work.
+- No automated provisioning of `SessionInventory` when a new Registration session is created; the local demo uses a guarded SQL script against AllocationDb. **This is for development only.**
+- Authentication and authorization are not implemented; some unpublished-session requests are accepted for development/testing.
+- RabbitMQ delivery is **at least once**, not exactly once; duplicate deliveries are handled by the current idempotency logic. Parking queues require trusted manual investigation; there is no audited replay interface or complete operational alerting.
+- Outbox publishers and the SQL Inbox processor are not designed to coordinate arbitrary numbers of active replicas via durable claims or leases. The Allocation processor's transient failure cooldown is in memory.
+- The current design does not provide global distributed transactions, guaranteed FIFO business decisions across services, or comprehensive automated full-system E2E and chaos tests.
+- Production secrets management, operational monitoring/alerting, capacity/performance qualification and stronger security boundaries remain future work.
 
-The focus is production-aware engineering and clear tradeoffs—not claiming the entire distributed platform is production-ready before those gaps are addressed.
+The focus is **production-aware engineering with explicit tradeoffs**, not a claim that this incremental portfolio platform is production-ready.

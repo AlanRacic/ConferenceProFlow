@@ -1,48 +1,53 @@
 @baseUrl = https://localhost:7217
 
-# ConferenceProFlow — M2.5 end-to-end demonstration
-# Run these requests from top to bottom, stopping AFTER demoCreateSession
-# to run docs/ALLOCATION_E2E_SEED.sql in ConferenceProFlowAllocation.
-# Start both the Registration API and Allocation Worker before registration requests.
-# IMPORTANT: For a second run, create a NEW session and use NEW participant email addresses.
-# STOP after demoCreateSession succeeds. Copy its response body `id` into @SessionIdText in
-# docs/ALLOCATION_E2E_SEED.sql, then execute the SQL script against the Allocation database.
-# The script creates capacity = 2 and ReservedCount = 0 for this session.
-# Only after seeding, continue with requests 3 through 8.
+# ConferenceProFlow — M2.6E: full round-trip allocation demo (local development only).
+# Prerequisites: SQL Server, RabbitMQ, Registration API and Allocation Worker are running.
+# The 5 required background services are enabled via local User Secrets.
+# Run each request in order in Visual Studio using "Send Request".
+# Requests automatically reuse IDs from earlier JSON responses; do NOT enter GUIDs into HTTP requests.
+# Participant emails contain a fresh generated GUID, allowing repeatable demos.
+# IMPORTANT: STOP after request 2. Seed capacity=2 in the Allocation database using
+# docs/ALLOCATION_E2E_SEED.sql; paste ONLY the new session ID into that SQL file.
+# After the seed succeeds, run requests 3-8; allow async consumers/publishers time to work.
+# Finally run GET requests 9-11. Expect TWO Confirmed and ONE Rejected in total.
+# Do not assume which particular participant gets Rejected; event order can differ.
 
-### 1. Create a dedicated demo conference
+### 1. Create a dedicated conference
 # @name demoCreateConference
 POST {{baseUrl}}/api/conferences
 Content-Type: application/json
 
 {
-  "name": "ConferenceProFlow Allocation Demo 2027",
+  "name": "ConferenceProFlow Allocation Roundtrip Demo 2027",
   "startsAtUtc": "2027-06-01T08:00:00Z",
   "endsAtUtc": "2027-06-02T18:00:00Z"
 }
 
-### 2. Create a demo session (its ID is needed to seed Allocation inventory)
+### 2. Create a new session (copy this response's 'id' ONCE into the SQL seed)
 # @name demoCreateSession
 POST {{baseUrl}}/api/conferences/{{demoCreateConference.response.body.$.id}}/sessions
 Content-Type: application/json
 
 {
-  "title": "Concurrency-Safe Seat Allocation",
+  "title": "Reliable Messaging and Capacity-Safe Allocation",
   "startsAtUtc": "2027-06-01T10:00:00Z",
   "endsAtUtc": "2027-06-01T11:30:00Z"
 }
 
-### 3. Create first demo participant
+### 3. Create Nora Ellis (unique test email on every run)
+# STOP — run docs/ALLOCATION_E2E_SEED.sql in the LOCAL ConferenceProFlowAllocation database.
+# Replace PASTE-SESSION-GUID-HERE with the 'id' from request 2. Check Capacity=2, ReservedCount=0.
+# Only then proceed to the three registrations.
 # @name demoCreateParticipant1
 POST {{baseUrl}}/api/participants
 Content-Type: application/json
 
 {
   "displayName": "Nora Ellis",
-  "email": "nora.ellis.demo2027a@example.com"
+  "email": "nora.ellis.m26e.{{$guid}}@example.com"
 }
 
-### 4. Register first participant for the demo session
+### 4. Register Nora for the new session
 # @name demoCreateRegistration1
 POST {{baseUrl}}/api/registrations
 Content-Type: application/json
@@ -52,17 +57,17 @@ Content-Type: application/json
   "sessionId": "{{demoCreateSession.response.body.$.id}}"
 }
 
-### 5. Create second demo participant
+### 5. Create Ethan Brooks (unique test email on every run)
 # @name demoCreateParticipant2
 POST {{baseUrl}}/api/participants
 Content-Type: application/json
 
 {
   "displayName": "Ethan Brooks",
-  "email": "ethan.brooks.demo2027a@example.com"
+  "email": "ethan.brooks.m26e.{{$guid}}@example.com"
 }
 
-### 6. Register second participant for the same session
+### 6. Register Ethan for the same session
 # @name demoCreateRegistration2
 POST {{baseUrl}}/api/registrations
 Content-Type: application/json
@@ -72,17 +77,17 @@ Content-Type: application/json
   "sessionId": "{{demoCreateSession.response.body.$.id}}"
 }
 
-### 7. Create third demo participant
+### 7. Create Maya Chen (unique test email on every run)
 # @name demoCreateParticipant3
 POST {{baseUrl}}/api/participants
 Content-Type: application/json
 
 {
   "displayName": "Maya Chen",
-  "email": "maya.chen.demo2027a@example.com"
+  "email": "maya.chen.m26e.{{$guid}}@example.com"
 }
 
-### 8. Register third participant (capacity was only 2)
+### 8. Register Maya for the same session
 # @name demoCreateRegistration3
 POST {{baseUrl}}/api/registrations
 Content-Type: application/json
@@ -92,11 +97,14 @@ Content-Type: application/json
   "sessionId": "{{demoCreateSession.response.body.$.id}}"
 }
 
-### 9. Inspect the original Registration-side status (still Pending in M2.5)
+### 9. Verify Nora's Registration status
+# Wait briefly for async message handling, then run requests 9-11.
+# The three final Registration statuses should contain TWO Confirmed and ONE Rejected.
+# If any still show Pending, check the background-service logs, RabbitMQ queues and Outbox tables.
 GET {{baseUrl}}/api/registrations/{{demoCreateRegistration1.response.body.$.id}}
 
-### 10. Inspect the other two Registration-side statuses
+### 10. Verify Ethan's Registration status
 GET {{baseUrl}}/api/registrations/{{demoCreateRegistration2.response.body.$.id}}
 
-### 11. Inspect the final Registration-side status
+### 11. Verify Maya's Registration status
 GET {{baseUrl}}/api/registrations/{{demoCreateRegistration3.response.body.$.id}}
