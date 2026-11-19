@@ -120,11 +120,71 @@ namespace ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence.Migrati
                         });
                 });
 
+            modelBuilder.Entity("ConferenceProFlow.Allocation.Worker.Messaging.Outbox.AllocationOutboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AllocationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("MessageType")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("nvarchar(160)");
+
+                    b.Property<DateTimeOffset?>("NextAttemptAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Payload")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("PublishAttempts")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("PublishedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("QuarantinedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AllocationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_AllocationOutboxMessages_AllocationId");
+
+                    b.HasIndex("PublishedAtUtc", "QuarantinedAtUtc", "NextAttemptAtUtc", "OccurredAtUtc")
+                        .HasDatabaseName("IX_AllocationOutboxMessages_PublishStatus");
+
+                    b.ToTable("AllocationOutboxMessages", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_AllocationOutboxMessages_PublishAttempts", "[PublishAttempts] >= 0");
+                        });
+                });
+
             modelBuilder.Entity("ConferenceProFlow.Allocation.Worker.Domain.Entities.Allocation", b =>
                 {
                     b.HasOne("ConferenceProFlow.Allocation.Worker.Domain.Entities.SessionInventory", null)
                         .WithMany()
                         .HasForeignKey("SessionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ConferenceProFlow.Allocation.Worker.Messaging.Outbox.AllocationOutboxMessage", b =>
+                {
+                    b.HasOne("ConferenceProFlow.Allocation.Worker.Domain.Entities.Allocation", null)
+                        .WithMany()
+                        .HasForeignKey("AllocationId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

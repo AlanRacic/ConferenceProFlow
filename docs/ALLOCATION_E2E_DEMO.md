@@ -1,192 +1,251 @@
-# ConferenceProFlow — M2.5 End-to-End Allocation Demo
+# ConferenceProFlow — M2.6 End-to-End Allocation and Reconciliation Demo
 
-This guide demonstrates the real local request path:
+This guide reproduces the **complete local registration-to-allocation-to-registration round trip**, using .NET 10, SQL Server, RabbitMQ, Docker Compose, and Visual Studio. It is a **development-only walkthrough**; no paid cloud services are required.
 
-`Registration API → Registration DB + Outbox → RabbitMQ → Allocation Consumer → Allocation SQL Inbox → Allocation Inbox Processor → Confirmed / Rejected Allocation`.
+```text
+Registration API
+  -> RegistrationDb (Pending Registration + Registration Outbox)
+  -> RabbitMQ: registration.requested.v1
+  -> Allocation Worker (durable request Inbox -> capacity-safe decision)
+  -> AllocationDb (Allocation + result Outbox)
+  -> RabbitMQ: allocation.decided.v1
+  -> Registration API (result consumer + reconciliation)
+  -> RegistrationDb (Confirmed / Rejected Registration + result Inbox)
+```
 
-The workflow uses the existing .NET 10 applications and Docker Compose. No paid services are required. This is a **development-only demonstration**; inventory is provisioned with a deliberate SQL seed because cross-service inventory provisioning has not yet been implemented.
+In **M2.5**, only the Allocation decision became final; Registration remained `Pending`. In **M2.6**, the allocation-result event travels back and Registration is reconciled asynchronously. A successful `201 Created` registration response **does not itself guarantee a seat**.
 
-> **Important:** `Allocation.Status` is updated in the Allocation database, but `Registration.Status` remains `Pending` in the Registration database. Publishing allocation-result events and reconciling those Registration statuses are planned for a later milestone. Do not interpret a `201 Created` registration response as a confirmed seat.
+## 1. Prerequisites
 
-## 1. Prerequisites and local configuration
+- .NET 10 SDK, Visual Studio with `.http` file support, Docker Desktop running Linux containers, and the project checked out locally.
+- Docker Compose file `infrastructure/compose.yaml` and a local `.env` based on `.env.example`.
+- Both existing databases, `ConferenceProFlowRegistration` and `ConferenceProFlowAllocation`, with their respective **EF Core migrations applied**.
+- Valid database connection strings and RabbitMQ settings in each application's **User Secrets**. Keep secrets out of Git, screenshots, and documentation.
+- The five hosted services enabled in local development:
 
-- .NET 10 SDK, Docker Desktop with Linux containers, Visual Studio with HTTP-file support (or a compatible HTTP client), and a SQL Server client such as SSMS or Visual Studio SQL Server Object Explorer.
-- Repo root: `C:\work\ConferenceProFlow` on the original developer machine; use your own checkout path elsewhere.
-- A local root `.env` based on `.env.example`, containing SQL Server and RabbitMQ credentials. Never commit `.env` or User Secrets.
-- Registration API User Secrets: `ConnectionStrings:RegistrationDb`, `RabbitMq:*`, `OutboxPublisher:Enabled=true`.
-- Allocation Worker User Secrets: `ConnectionStrings:AllocationDb`, `RabbitMq:*`, `RabbitMqConsumer:Enabled=true`, `AllocationInboxProcessor:Enabled=true`.
-- Existing Registration and Allocation EF Core migrations already applied to their **separate** databases.
+| Application | User Secrets key | Purpose |
+|---|---|---|
+| Registration API | `OutboxPublisher:Enabled` | Publishes registration-request events |
+| Registration API | `AllocationResultConsumer:Enabled` | Receives decisions and updates Registration |
+| Allocation Worker | `RabbitMqConsumer:Enabled` | Receives registration requests |
+| Allocation Worker | `AllocationInboxProcessor:Enabled` | Makes capacity-safe decisions |
+| Allocation Worker | `AllocationOutboxPublisher:Enabled` | Publishes allocation-result events |
 
-If not configured already, refer to `docs/LOCAL_DEVELOPMENT.md`. Do not print credentials in demo screenshots or shared logs.
+Set each key to `true` for this demo. Preserve the rest of the existing User Secrets; do **not** overwrite existing connection strings or credentials. See [`LOCAL_DEVELOPMENT.md`](LOCAL_DEVELOPMENT.md) for configuration and migration instructions.
 
-## 2. Start infrastructure
+## 2. Start the local infrastructure
 
-From the repository root in PowerShell:
+From the repository root, for example `C:\work\ConferenceProFlow`, run in **Visual Studio → View → Terminal**:
 
 ```powershell
 docker compose --env-file .env -f infrastructure/compose.yaml up -d
 ```
 
-Check:
+Check that the containers are running:
 
 ```powershell
 docker compose --env-file .env -f infrastructure/compose.yaml ps
 ```
 
-The local endpoints are SQL Server `127.0.0.1,14333`, RabbitMQ AMQP `127.0.0.1:5672`, and RabbitMQ Management `http://127.0.0.1:15672` (vhost `conferenceproflow`).
+The documented local endpoints are SQL Server `127.0.0.1,14333`, RabbitMQ AMQP `127.0.0.1:5672`, and RabbitMQ Management `http://127.0.0.1:15672` (virtual host `conferenceproflow`). Do not proceed if the infrastructure is unavailable.
 
-## 3. Start both applications
+## 3. Start Registration API and Allocation Worker
 
-Open **two** PowerShell terminals (or launch each project separately through Visual Studio).
+Keep both processes running in separate Visual Studio terminals.
 
-Terminal A — Registration API:
+**Terminal 1 — Registration API:**
 
 ```powershell
 dotnet run --project src/ConferenceProFlow.Registration.Api/ConferenceProFlow.Registration.Api.csproj --launch-profile https
 ```
 
-Expected HTTPS endpoint: `https://localhost:7217`. The launch profile configures Development, allowing User Secrets to load. Ensure `OutboxPublisher:Enabled` is `true`.
+Expected development API URL: `https://localhost:7217`.
 
-Terminal B — Allocation Worker:
+**Terminal 2 — Allocation Worker:**
 
 ```powershell
 dotnet run --project src/ConferenceProFlow.Allocation.Worker/ConferenceProFlow.Allocation.Worker.csproj --launch-profile ConferenceProFlow.Allocation.Worker
 ```
 
-The Worker's launch profile configures Development. Both `RabbitMqConsumer:Enabled` and `AllocationInboxProcessor:Enabled` must be `true`. Check startup logs for the RabbitMQ consumer **and** Allocation Inbox processor. No need to start a second Worker instance.
+Check the application logs for both consumers and the relevant publishers/processors. **Start/confirm the Registration result consumer before producing allocation decisions**: it owns the durable result queue and binding needed for the Allocation publisher's mandatory routing. Do not start multiple Worker instances for this single-instance demo.
 
-If HTTPS trust fails on a new machine, run `dotnet dev-certs https --trust` and retry.
+## 4. Create a fresh conference and session
 
-## 4. Create the conference and session
+In Visual Studio, open **[`ALLOCATION_E2E.http`](ALLOCATION_E2E.http)** and execute only:
 
-Open `docs/ALLOCATION_E2E.http` in Visual Studio. Execute requests **1** and **2** in order:
+1. **Request 1 — Create a dedicated conference** (`demoCreateConference`).
+2. **Request 2 — Create a new session** (`demoCreateSession`).
 
-1. `demoCreateConference` — creates a conference.
-2. `demoCreateSession` — creates a new session and returns an `id` GUID.
+Each successful POST should return `201 Created`. Visual Studio named-request expressions automatically feed the conference ID into request 2 and later feed the session ID into registration requests.
 
-**Copy the session `id` GUID** from request 2's response. Do **not** send the registration requests yet.
+**Stop after request 2.** Copy the new session's response `id` **once**, for the SQL inventory seed below. Do not start creating registrations before provisioning inventory.
 
-Create a fresh session for every new complete demo. If participants from a previous demo already exist, change the three example emails to new unique addresses; the API enforces participant-email uniqueness.
+Every complete demo run should create a **new session**. Participant email addresses in the updated `.http` file use `{{$guid}}` and are generated uniquely; no manual participant or registration GUID entry is needed.
 
-## 5. Provision capacity 2 for that session
+> `.http` troubleshooting: if request 2 returns `400` and the error says `'#' is invalid after a single JSON value`, ensure comments are separated from the preceding JSON body by a new `###` request delimiter. Use the corrected `ALLOCATION_E2E.http` file rather than appending instructional comments immediately after JSON without a delimiter.
 
-Open `docs/ALLOCATION_E2E_SEED.sql` in SSMS or your SQL client, connected to the **local development** SQL Server at `127.0.0.1,14333`.
+## 5. Seed capacity using Visual Studio SQL Server Object Explorer
 
-Replace `PASTE-SESSION-GUID-HERE` with the session ID from step 4 and execute the script. It explicitly switches to the Allocation database and inserts one `SessionInventories` row with:
+The Registration service owns session details; **automatic Allocation inventory provisioning is not yet implemented**. We deliberately create the corresponding Allocation-side `SessionInventory` for this local demonstration.
 
-- `Capacity = 2`
-- `ReservedCount = 0`
-- `SessionId =` the actual Registration session GUID
-- `RowVersion` generated automatically by SQL Server
+1. Open **View → SQL Server Object Explorer**.
+2. Connect to your local SQL Server at `127.0.0.1,14333` using your existing development credentials.
+3. Expand **Databases → ConferenceProFlowAllocation**, right-click the database, and select **New Query**.
+4. Open [`ALLOCATION_E2E_SEED.sql`](ALLOCATION_E2E_SEED.sql), paste its entire contents into that query editor, and replace only `PASTE-SESSION-GUID-HERE` in the declaration of `@SessionIdText` with the session ID from HTTP request 2.
+5. Verify the active connection is the **local Allocation database**, then execute the SQL query.
 
-The script intentionally refuses to run without a valid GUID or when the inventory already exists. The Registration database is **not** modified directly by this script. This seed is only a temporary local-development provisioning step, not a production API or supported operating procedure.
+The guarded seed creates a row in `SessionInventories`. Expected initial output:
 
-## 6. Send three registration requests
+| Field | Expected |
+|---|---|
+| `SessionId` | New session ID from request 2 |
+| `Capacity` | `2` |
+| `ReservedCount` | `0` |
+| `RowVersion` | Generated by SQL Server |
 
-Return to `docs/ALLOCATION_E2E.http`. Execute requests **3–8**, in order:
+The script rejects invalid IDs and sessions that already have an inventory row. It **must not be run against production databases**; it is not an API for production inventory management.
 
-- Create Nora Ellis, then register Nora.
-- Create Ethan Brooks, then register Ethan.
-- Create Maya Chen, then register Maya.
+## 6. Submit three registrations
 
-All three registrations target the **same** session. The Registration API returns `201 Created` and an initial `Pending` status for each request. Publication and consumption are asynchronous; allow time for the Outbox publisher and Inbox processor polling cycles to run.
+Return to `docs/ALLOCATION_E2E.http` and execute **requests 3–8 in order**:
 
-The test is about aggregate results, not which of the three participants is rejected if events are reordered. Once processing finishes, **two** Allocation results should be Confirmed and **one** Rejected, with no overbooking.
+| Request | Action |
+|---|---|
+| 3 | Create Nora Ellis |
+| 4 | Register Nora for the new session |
+| 5 | Create Ethan Brooks |
+| 6 | Register Ethan for the same session |
+| 7 | Create Maya Chen |
+| 8 | Register Maya for the same session |
 
-## 7. Inspect the Allocation database
+Expect `201 Created` for the successful POST requests. The registration response initially reports `Pending`. There is **no need to paste participant, registration, or session GUIDs into these requests**: named response variables supply them automatically.
 
-Connect to `ConferenceProFlowAllocation` in a SQL client and replace the GUID placeholder with your demo session ID:
+The Registration Outbox publisher, Allocation consumer/Inbox processor, Allocation result Outbox publisher, and Registration result consumer run asynchronously. Allow a little time for each part of the pipeline to complete.
 
-```sql
-USE [ConferenceProFlowAllocation];
-GO
-DECLARE @SessionId uniqueidentifier = 'PASTE-SESSION-GUID-HERE';
+## 7. Check final Registration statuses through HTTP
 
-SELECT SessionId, Capacity, ReservedCount
-FROM dbo.SessionInventories
-WHERE SessionId = @SessionId;
+Execute **GET requests 9–11** in the same `.http` file. Each automatically uses the corresponding created registration ID.
 
-SELECT im.Id AS MessageId, im.RegistrationId, im.SessionId,
-       im.ReceivedAtUtc, im.ProcessedAtUtc,
-       a.Status AS AllocationStatus, a.RejectionReason
-FROM dbo.InboxMessages AS im
-LEFT JOIN dbo.Allocations AS a ON a.RegistrationId = im.RegistrationId
-WHERE im.SessionId = @SessionId
-ORDER BY im.ReceivedAtUtc, im.Id;
+**Expected aggregate outcome for a fresh session:**
 
-SELECT COUNT(*) AS TotalAllocations,
-       SUM(CASE WHEN Status = 1 THEN 1 ELSE 0 END) AS Confirmed,
-       SUM(CASE WHEN Status = 2 THEN 1 ELSE 0 END) AS Rejected
-FROM dbo.Allocations
-WHERE SessionId = @SessionId;
-```
-
-Expected results after all three are processed:
-
-| Check | Expected |
+| Final Registration status | Expected count |
 |---|---:|
-| Capacity | 2 |
-| ReservedCount | 2 |
-| Inbox rows for demo session | 3 |
-| Inbox rows where `ProcessedAtUtc IS NOT NULL` | 3 |
-| Confirmed allocations (`Status = 1`) | 2 |
-| Rejected allocations (`Status = 2`) | 1 |
-| Total allocations | 3 |
+| `Confirmed` | `2` |
+| `Rejected` | `1` |
+| `Pending` | `0` |
 
-The rejected allocation should contain `RejectionReason = 'Session capacity reached.'`. There should be no duplicate `RegistrationId` in Allocation.
+The rejected registration should include `"rejectionReason": "Session capacity reached."`. Which participant is rejected is **not guaranteed**: message processing is asynchronous, and the demonstration does not promise globally ordered delivery.
 
-## 8. Verify Outbox publication and Registration status
+If a status still reads `Pending`, repeat its **GET** after processing completes; **do not create a replacement registration or manually update its status**. If it stays pending, inspect logs and the queues/Outbox states described below.
 
-On the Registration database, replace the same session GUID:
+## 8. Verify both databases in SQL Server Object Explorer
+
+This is a **read-only development diagnostic**. Although it reads both databases in one SQL window, the running applications still own and write only their **separate** databases.
+
+Right-click `ConferenceProFlowAllocation` → **New Query** and run the following SQL. **Replace the one session GUID placeholder** with the ID returned by request 2. The SQL uses fully qualified table names and does not modify any rows.
 
 ```sql
-USE [ConferenceProFlowRegistration];
-GO
 DECLARE @SessionId uniqueidentifier = 'PASTE-SESSION-GUID-HERE';
 
-SELECT Id, ParticipantId, SessionId, Status, CreatedAtUtc
-FROM dbo.Registrations
-WHERE SessionId = @SessionId
-ORDER BY CreatedAtUtc, Id;
+-- (A) Capacity and actual reservations: expect 2 / 2.
+SELECT SessionId, Capacity, ReservedCount
+FROM [ConferenceProFlowAllocation].[dbo].[SessionInventories]
+WHERE SessionId = @SessionId;
 
-SELECT o.Id AS MessageId, o.MessageType, o.PublishedAtUtc,
-       o.PublishAttempts, o.LastError,
-       JSON_VALUE(o.Payload, '$.registrationId') AS RegistrationId
-FROM dbo.OutboxMessages AS o
-WHERE TRY_CONVERT(uniqueidentifier,
-      JSON_VALUE(o.Payload, '$.sessionId')) = @SessionId
+-- (B) The three Registration outcomes, the three Allocation decisions,
+-- and the two durable Inbox records (one per direction).
+SELECT
+    (SELECT COUNT(*) FROM [ConferenceProFlowRegistration].[dbo].[Registrations] WHERE SessionId = @SessionId) AS RegistrationTotal,
+    (SELECT COUNT(*) FROM [ConferenceProFlowRegistration].[dbo].[Registrations] WHERE SessionId = @SessionId AND Status = 0) AS RegistrationPending,
+    (SELECT COUNT(*) FROM [ConferenceProFlowRegistration].[dbo].[Registrations] WHERE SessionId = @SessionId AND Status = 1) AS RegistrationConfirmed,
+    (SELECT COUNT(*) FROM [ConferenceProFlowRegistration].[dbo].[Registrations] WHERE SessionId = @SessionId AND Status = 2) AS RegistrationRejected,
+    (SELECT COUNT(*) FROM [ConferenceProFlowAllocation].[dbo].[Allocations] WHERE SessionId = @SessionId) AS AllocationTotal,
+    (SELECT COUNT(*) FROM [ConferenceProFlowAllocation].[dbo].[Allocations] WHERE SessionId = @SessionId AND Status = 1) AS AllocationConfirmed,
+    (SELECT COUNT(*) FROM [ConferenceProFlowAllocation].[dbo].[Allocations] WHERE SessionId = @SessionId AND Status = 2) AS AllocationRejected,
+    (SELECT COUNT(*) FROM [ConferenceProFlowAllocation].[dbo].[InboxMessages] WHERE SessionId = @SessionId) AS AllocationInboxTotal,
+    (SELECT COUNT(*) FROM [ConferenceProFlowAllocation].[dbo].[InboxMessages] WHERE SessionId = @SessionId AND ProcessedAtUtc IS NOT NULL) AS AllocationInboxProcessed,
+    (SELECT COUNT(*) FROM [ConferenceProFlowRegistration].[dbo].[AllocationResultInboxMessages] WHERE SessionId = @SessionId) AS RegistrationResultInboxTotal;
+
+-- (C) Verify that final status and rejection reason agree per Registration.
+SELECT p.DisplayName,
+       r.Id AS RegistrationId,
+       CASE r.Status WHEN 0 THEN 'Pending' WHEN 1 THEN 'Confirmed' WHEN 2 THEN 'Rejected' ELSE 'Unknown' END AS RegistrationStatus,
+       CASE a.Status WHEN 1 THEN 'Confirmed' WHEN 2 THEN 'Rejected' ELSE 'Missing' END AS AllocationStatus,
+       ri.Status AS ResultInboxStatus,
+       r.RejectionReason AS RegistrationRejectionReason,
+       a.RejectionReason AS AllocationRejectionReason,
+       CASE WHEN a.Id IS NOT NULL AND ri.Id IS NOT NULL AND a.Status = r.Status THEN 'OK' ELSE 'CHECK' END AS ReconciliationCheck
+FROM [ConferenceProFlowRegistration].[dbo].[Registrations] AS r
+JOIN [ConferenceProFlowRegistration].[dbo].[Participants] AS p ON p.Id = r.ParticipantId
+LEFT JOIN [ConferenceProFlowAllocation].[dbo].[Allocations] AS a ON a.RegistrationId = r.Id
+LEFT JOIN [ConferenceProFlowRegistration].[dbo].[AllocationResultInboxMessages] AS ri ON ri.RegistrationId = r.Id
+WHERE r.SessionId = @SessionId
+ORDER BY r.CreatedAtUtc, r.Id;
+
+-- (D) Request Outbox publication: three published registration requests.
+SELECT o.Id AS MessageId, o.MessageType, o.PublishedAtUtc, o.PublishAttempts, o.LastError
+FROM [ConferenceProFlowRegistration].[dbo].[OutboxMessages] AS o
+WHERE TRY_CONVERT(uniqueidentifier, JSON_VALUE(o.Payload, '$.sessionId')) = @SessionId
+ORDER BY o.OccurredAtUtc, o.Id;
+
+-- (E) Result Outbox publication: three published allocation decisions.
+SELECT o.Id AS MessageId, o.AllocationId, o.MessageType, o.PublishedAtUtc, o.PublishAttempts, o.LastError
+FROM [ConferenceProFlowAllocation].[dbo].[AllocationOutboxMessages] AS o
+WHERE o.AllocationId IN (SELECT a.Id FROM [ConferenceProFlowAllocation].[dbo].[Allocations] AS a WHERE a.SessionId = @SessionId)
 ORDER BY o.OccurredAtUtc, o.Id;
 ```
 
-All three Registration rows should still have **Status = 0 (`Pending`)**. That is correct for M2.5, even though Allocation has already made Confirmed/Rejected decisions. The matching Outbox rows should generally have non-NULL `PublishedAtUtc` once the publisher finishes.
+Expected after the three-registration demo:
 
-You may also execute requests 9–11 in `docs/ALLOCATION_E2E.http` to verify that the HTTP GET endpoints still report Pending.
+| Check | Expected |
+|---|---:|
+| Inventory `Capacity` / `ReservedCount` | `2` / `2` |
+| Registrations / Allocations | `3` / `3` |
+| Registration `Confirmed` / `Rejected` / `Pending` | `2` / `1` / `0` |
+| Allocation `Confirmed` / `Rejected` | `2` / `1` |
+| Allocation request-Inbox rows / processed | `3` / `3` |
+| Registration result-Inbox rows | `3` |
+| Reconciliation rows where `ReconciliationCheck = 'OK'` | `3` |
+| Registration request-Outbox / Allocation result-Outbox | `3` published / `3` published |
 
-## 9. Optional negative path: missing inventory
+A published Outbox message generally has a non-`NULL` `PublishedAtUtc`. If records are still pending, check background service activity and retry timing before drawing conclusions. For the rejected Registration, the two databases should agree on the reason `Session capacity reached.`.
 
-For a separate new demo session, **skip** the seed script and submit a registration. After its event is accepted, the Inbox row should exist but remain with `ProcessedAtUtc = NULL` and no Allocation row, because the processor does not invent a session capacity.
+## 9. Optional reliability demonstration — stop and restart the Allocation Worker
 
-Then create a real SessionInventory using the seed script for that session. The running Inbox processor should detect the now-eligible pending message and process it on its next poll. This validates delayed provisioning **without re-publishing** the RabbitMQ event.
+**Use this only after the baseline demo has completed.** Keep Registration API, SQL Server and RabbitMQ running throughout.
 
-Use a separate new session rather than deleting or changing the inventory from the capacity-2 demonstration.
+1. Stop **only** the Allocation Worker with `Ctrl+C` in its terminal.
+2. In Visual Studio, use the separately prepared local recovery `.http` requests to create a **new participant and new registration** for an already provisioned, full session. Keep the same session ID for these requests; named HTTP request variables still avoid manual participant and registration IDs.
+3. GET the registration while the Worker is stopped. Expect `Pending`.
+4. Restart the Worker with the **same single-line** terminal command from section 3.
+5. Repeat the GET after processing. For a session whose two places are already reserved, expect `Rejected` with `Session capacity reached.` — without resubmitting the registration.
+
+This check illustrates that a previously accepted request can be processed after a Worker interruption. It does **not** by itself prove recovery from every broker/database outage or exactly-once delivery. Other failure and redelivery paths are covered by selected automated Testcontainers tests.
+
+**Important:** This recovery scenario creates an **additional** registration. If you reuse the baseline session (originally 2 Confirmed / 1 Rejected), its totals will then become **2 Confirmed / 2 Rejected**. The summary in section 8 applies to the **fresh three-registration baseline before this additional test**. For a clean repeat, create a new session; never delete durable records to force matching totals.
+
+Do not commit a run-specific recovery file containing your actual session GUID. Keep the reusable project documentation generic.
 
 ## 10. Troubleshooting
 
-| Symptom | Check |
+| Symptom | Likely checks |
 |---|---|
-| API cannot start | Registration connection string, migrations, SQL container, Development environment |
-| Worker cannot start | Allocation connection string, migrations, Developer User Secrets, `DOTNET_ENVIRONMENT` |
-| Registration 409 | Participant email already exists, or duplicate participant/session registration; create fresh participants |
-| Registration exists, Outbox remains unpublished | `OutboxPublisher:Enabled=true`, RabbitMQ connectivity/vhost/credentials, `LastError` and `NextAttemptAtUtc` |
-| Outbox published, Inbox absent | RabbitMQ consumer enabled, queue/binding, worker logs and parking queue |
-| Inbox exists but remains pending | Processor enabled; corresponding `SessionInventory` exists; worker logs; failure cooldown |
-| Inbox processed, Allocation not visible | Query the correct Allocation database and same `RegistrationId`; inspect errors before claiming success |
-| Allocation confirmed, Registration still Pending | **Expected in M2.5** until allocation-result events and status reconciliation are added |
-| Unexpected totals | Check that the session is fresh and the seed created exactly two seats; filter SQL queries by the intended session GUID |
+| `400 Bad Request` on `.http` session creation | Check request JSON and `###` boundaries; comments must not leak into the JSON body |
+| Registration API does not start | SQL connection string, migrations, Docker SQL availability, launch profile, User Secrets |
+| Allocation Worker does not start | Allocation SQL connection, migrations, RabbitMQ credentials/virtual host, enabled hosted services |
+| Registration request returns `409` | Previously used participant email or duplicate participant/session combination; use a fresh session and generated email |
+| Registration Outbox has no `PublishedAtUtc` | `OutboxPublisher:Enabled`, RabbitMQ connectivity, publisher logs, `LastError`/`NextAttemptAtUtc` |
+| Request published but Allocation Inbox is absent | RabbitMQ request consumer, request queue/binding, failed-request parking queue, Worker logs |
+| Allocation Inbox remains unprocessed | `AllocationInboxProcessor:Enabled` and matching `SessionInventory`; check processing logs/cooldown |
+| Allocation exists but Registration remains `Pending` | `AllocationOutboxPublisher:Enabled`, result Outbox publication, `AllocationResultConsumer:Enabled`, result queue/binding and consumer logs |
+| Conflict / invalid result message | Inspect `registration.failed-allocation-results.v1` and application logs; do not casually replay or delete records |
+| Incorrect totals | Ensure SQL is filtered to the correct fresh session; an extra recovery registration changes counts |
 
-Do not delete or manually alter durable Inbox/Outbox/Allocation state to make the demo pass. Investigate the actual reason if the expected conditions are not met.
+RabbitMQ topology: exchange `conferenceproflow.events`, request queue `allocation.registration-requests.v1`, result queue `registration.allocation-results.v1`. Parking queues: `allocation.failed-registration-requests.v1` and `registration.failed-allocation-results.v1`. See [`MESSAGING_DESIGN.md`](MESSAGING_DESIGN.md) for ACK, publisher confirmation, retry, and idempotency details.
 
-## 11. Automated regression checks
+## 11. Automated regression and final validation
+
+From the repository root, with Docker Desktop running for Testcontainers integration tests:
 
 ```powershell
 dotnet build ConferenceProFlow.slnx --configuration Release
@@ -196,13 +255,13 @@ dotnet build ConferenceProFlow.slnx --configuration Release
 dotnet test ConferenceProFlow.slnx --configuration Release --no-build --verbosity normal
 ```
 
-Existing automated suites cover consumer intake, SQL Inbox idempotency, domain capacity, optimistic concurrency, concurrent allocation, and the Inbox background processor. **This guide is a manually executable cross-service end-to-end check; it is not an additional automated full-system E2E test.**
+Automated suites cover domain allocation/concurrency, SQL persistence and reconciliation, RabbitMQ consumers, and selected retry/redelivery/parking behavior. **The manually executed two-service walkthrough is not itself an automated full-system E2E test.** Report what actually passed; do not infer universal reliability guarantees from one successful run.
 
-## 12. Current architecture boundaries
+## 12. Architecture boundaries
 
-- The two services retain independent SQL databases, connected through versioned RabbitMQ events.
-- Allocation decisions and Inbox completion are committed atomically in the Allocation database.
-- The local seed script fills a gap in inventory provisioning for demonstration purposes.
-- M2.5 does not yet publish allocation-result events or update `Registration.Status` to Confirmed/Rejected.
-- Authentication, authorization, session-publication rules, monitoring and administrative replay tooling remain outside the current implemented scope.
-- Current Outbox and Inbox polling implementations are not presented as multi-replica production coordinators.
+- Each service owns its own database. Cross-database queries above are **developer-only diagnostics**, not application architecture.
+- Transactional Outbox protects each service's local business-data-plus-event commit; durable Inbox and idempotency protect the receiving side against repeated deliveries, under the implemented constraints.
+- The system provides **at-least-once** messaging behavior, not globally exactly-once processing, and eventual rather than immediate cross-service consistency.
+- `SessionInventory` is still provisioned manually for the local demo; production-grade automatic provisioning is outside this milestone.
+- Authentication/authorization, comprehensive monitoring/alerting, audited replay, performance qualification and multi-replica publisher/processor coordination remain future work.
+- This is a **production-aware portfolio implementation**, not an assertion of full production readiness.

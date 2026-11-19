@@ -8,7 +8,9 @@ The messaging architecture is designed around independent service ownership, rel
 
 The Registration service implements the Transactional Outbox pattern. Registration data and the corresponding outgoing event are committed to the same SQL Server database transaction. A background publisher subsequently sends pending Outbox messages to RabbitMQ.
 
-**Implementation status (M2.5):** Registration-side Transactional Outbox, RabbitMQ publishing and consumption, durable Allocation SQL Inbox, capacity-aware allocation decisions, and automatic pending-Inbox processing are implemented and covered by automated component/integration tests. **Inventory is not yet provisioned automatically, and Allocation does not yet publish allocation-result events or reconcile Registration statuses.**
+**Implementation status (M2.6):** Both directions of the event flow are implemented: Registration publishes registration requests and Allocation publishes allocation decisions via their respective transactional Outbox pipelines; both services consume events through durable RabbitMQ queues and SQL Inbox/idempotency handling. Allocation makes capacity-safe decisions, and Registration reconciles final statuses to `Confirmed` or `Rejected`. The workflow was verified manually with two seats and three registrations, and with a Worker stop/restart recovery scenario. These checks complement automated unit and integration tests; they do not establish exactly-once delivery or production readiness.
+
+**Known boundary:** Session inventory is not created automatically when Registration creates a session. The local demo uses a development-only SQL seed against AllocationDb.
 
 ## 2. Service Responsibilities
 
@@ -20,7 +22,8 @@ The Registration API owns:
 - Participant records.
 - Registration requests and lifecycle state.
 - Registration Outbox messages and their publication state.
-- Future processing of allocation-result events.
+- Consumption of `AllocationDecidedV1` through a Registration-owned RabbitMQ results queue.
+- Durable `AllocationResultInboxMessages` receipts and reconciliation of registrations to final `Confirmed` / `Rejected` status.
 
 ### Allocation Service
 
@@ -32,16 +35,19 @@ The Allocation Worker owns:
 - Durable SQL Inbox storage, duplicate detection, and conflict handling.
 - Parking of invalid or conflicting RabbitMQ deliveries for investigation.
 - Capacity-safe processing of pending SQL Inbox messages into Confirmed or Rejected allocations, with a background processor and SQL transaction consistency.
+- Durable `AllocationOutboxMessages` and publication of `AllocationDecidedV1` outcomes after local persistence.
 
 Each service maintains its own SQL Server database. Neither service directly modifies the other service's database.
 
-## 3. Initial Integration Event
+## 3. Versioned Integration Events
 
-The first integration event is `RegistrationRequestedV1`, with message type `registration.requested.v1`.
+### 3.1. RegistrationRequestedV1 (Registration → Allocation)
+
+The request integration event is `RegistrationRequestedV1`, with message type `registration.requested.v1`.
 
 The event represents a newly created registration request awaiting allocation.
 
-### Message Contract
+### Request Message Contract
 
 | Field | Type | Description |
 |---|---|---|
@@ -52,7 +58,7 @@ The event represents a newly created registration request awaiting allocation.
 
 The event deliberately excludes participant personal information because the Allocation Worker does not require it to make an allocation decision.
 
-### JSON Representation
+### Request JSON Representation
 
 ```json
 {
@@ -64,6 +70,36 @@ The event deliberately excludes participant personal information because the All
 ```
 
 The JSON contract uses camelCase property names and UTC timestamps. Integration contracts are versioned independently of internal C# namespaces and domain entities.
+
+### 3.2. AllocationDecidedV1 (Allocation → Registration)
+
+After a capacity decision has been persisted, Allocation publishes an `AllocationDecidedV1` event with message type and routing key `allocation.decided.v1`.
+
+| Field | Type | Description |
+|---|---|---|
+| `MessageId` | `Guid` | Identity of this result event; the Allocation Outbox row `Id` equals this ID |
+| `AllocationId` | `Guid` | Identity of the persisted Allocation decision |
+| `RegistrationId` | `Guid` | Registration to reconcile |
+| `SessionId` | `Guid` | Session referenced by the allocation |
+| `Status` | `string` | `confirmed` or `rejected` in the event payload |
+| `RejectionReason` | `string?` | `null` when confirmed; populated when rejected |
+| `OccurredAtUtc` | `DateTimeOffset` | UTC event timestamp |
+
+Example rejected decision (illustrative test identifiers):
+
+```json
+{
+  "messageId": "a02d33df-9f66-40c8-9a3f-a8c955c2cc8a",
+  "allocationId": "00d94fb3-ecb0-4863-a580-e01e23d43f4c",
+  "registrationId": "6ed94d51-f3db-434f-9923-d9e27cf7813f",
+  "sessionId": "765f56ae-0f5f-4c76-a52c-a4195e1d344c",
+  "status": "rejected",
+  "rejectionReason": "Session capacity reached.",
+  "occurredAtUtc": "2026-11-19T16:50:00+00:00"
+}
+```
+
+Both services keep their own event contract types. The receiving side validates the wire contract and never requires direct access to the other service's database.
 
 ## 4. Message Identity and Delivery Semantics
 
@@ -77,13 +113,15 @@ RabbitMQ publisher confirmation indicates broker acceptance of the publication, 
 
 The implemented Allocation consumer is **idempotent at the durable-receipt (Inbox) boundary**. SQL constraints prevent multiple Inbox rows for the same `MessageId` or `RegistrationId`. Business-level idempotency is implemented separately by `AllocationProcessingService`, SQL uniqueness on `Allocation.RegistrationId`, optimistic concurrency, and re-evaluation after conflicts.
 
-The consumer uses manual RabbitMQ acknowledgements: it acknowledges a valid request **after** persisting it or verifying an existing identical/compatible Inbox record. Acknowledging a message means that durable intake succeeded; it **does not mean a seat has been allocated**.
+The Allocation request consumer uses manual RabbitMQ acknowledgements: it acknowledges a valid request **after** persisting it or verifying an existing identical/compatible Inbox record. This ACK means durable intake succeeded; it **does not mean a seat has been allocated**.
 
-## 5. Transactional Outbox
+The Registration result consumer separately acknowledges a valid allocation result only after reconciliation has committed or an existing compatible decision is recognized. SQL uniqueness and business comparisons defend against redelivery of the same `MessageId`, repetition of the same decision with another message ID, and conflicting updates. Neither consumer provides exactly-once transport delivery.
+
+## 5. Transactional Outboxes
 
 The Registration service stores Outbox messages in its own SQL Server database.
 
-### Outbox Schema
+### Registration Outbox Schema
 
 The implemented `OutboxMessages` entity contains:
 
@@ -119,9 +157,22 @@ Messages are eligible when they are unpublished, not quarantined, and have no fu
 
 The current implementation assumes **one active publisher instance**. It does not claim or lease Outbox rows for coordination among multiple application replicas.
 
+### Allocation Result Outbox (M2.6B–M2.6C)
+
+The Allocation database has a separate `AllocationOutboxMessages` table. Its rows represent durable result events, not Registration-side requests. Each stores `Id` (= result `MessageId`), `AllocationId`, `MessageType`, serialized `Payload`, `OccurredAtUtc`, `PublishedAtUtc`, `PublishAttempts`, `LastError`, `NextAttemptAtUtc`, and `QuarantinedAtUtc`.
+
+- `AllocationId` has a **unique index**, so a given Allocation cannot create multiple logical result-Outbox rows.
+- The result payload and message identity are generated once and reused on publication retries.
+- The Allocation processing flow is designed to persist the allocation decision, relevant inventory update, Inbox completion, and result Outbox together within the **Allocation** database consistency boundary. This is separate from the Registration database transaction; confirm the final write path and the related integration coverage during the pre-merge review.
+- `AllocationOutboxPublisherService` polls up to 20 eligible rows approximately every five seconds, validates the stored result payload, publishes persistent `allocation.decided.v1` messages with publisher confirmations and `mandatory: true`, and then records `PublishedAtUtc`.
+- Failure metadata and retry scheduling are durable; invalid known payloads are quarantined in SQL instead of being sent. The default publish-attempt timeout is 15 seconds, configurable through `AllocationOutboxPublisher:PublishTimeoutSeconds` (1–120 seconds).
+- **Queue ownership:** the Allocation publisher declares the shared event exchange, but does **not** create the Registration-owned result queue. The Registration consumer declares/binds that queue. An absent binding makes mandatory publication fail rather than silently mark the event as published.
+
+As in the Registration Outbox, a broker confirmation does **not** imply consumer processing. A broker confirmation followed by a SQL update failure can lead to the same result event being published again. The Registration result Inbox makes that redelivery safe at the business boundary.
+
 ## 6. Reliability and Failure Handling
 
-### 6.1. Failure Scenarios
+### 6.1. Failure Scenarios (both directions)
 
 | Scenario | Expected behavior |
 |---|---|
@@ -133,7 +184,7 @@ The current implementation assumes **one active publisher instance**. It does no
 | Known event payload is permanently invalid | Message is quarantined in SQL Server |
 | RabbitMQ accepts a message but SQL status update fails | Duplicate publication is possible on retry |
 
-### 6.2. Persistent Retry Scheduling
+### 6.2. Persistent Retry Scheduling (Registration publisher)
 
 Failed publication attempts are recorded in SQL Server. `NextAttemptAtUtc` determines when an unpublished message may be retried.
 
@@ -152,7 +203,7 @@ Retry delays are capped at five minutes; **the number of transient-failure retri
 
 The polling loop can continue publishing other eligible messages while an unsuccessful message is deferred. This mitigates head-of-line blocking, but it does not replace a full queue-scheduling or distributed-work coordination mechanism.
 
-### 6.3. Publish Timeout
+### 6.3. Publish Timeout (Registration publisher)
 
 RabbitMQ connection and publishing attempts use a configurable linked cancellation token. The default value of `OutboxPublisher:PublishTimeoutSeconds` is **15 seconds**.
 
@@ -160,7 +211,7 @@ The timeout limits the intended attempt, but does not guarantee that every Rabbi
 
 A timeout does not prove that the broker rejected the message. Consequently, retrying after a timeout can produce duplicates.
 
-### 6.4. Payload Validation and Quarantine
+### 6.4. Payload Validation and Quarantine (Registration publisher)
 
 Before publication, `OutboxPayloadValidator` validates the known `RegistrationRequestedV1` contract, including:
 
@@ -175,31 +226,26 @@ Quarantine is a **SQL Outbox state**, not a RabbitMQ dead-letter queue. An audit
 
 Unknown future message types do not yet have dedicated payload validators. An unknown routing key may remain unpublished and be retried with backoff if RabbitMQ cannot route it.
 
+The Allocation result publisher has equivalent durable publish-state fields and its own `AllocationOutboxPayloadValidator` and retry policy. Its current polling loop stops the current batch after a publish failure and tries again later; therefore failure-isolation details are not identical to the Registration publisher.
+
 ## 7. RabbitMQ Topology
 
-The implemented local-development topology is:
+Both message directions share the durable topic exchange `conferenceproflow.events`, but each receiving service owns its **own durable queue and parking queue**.
 
-| Component | Name or behavior |
-|---|---|
-| Virtual host | `conferenceproflow` |
-| Exchange | `conferenceproflow.events` |
-| Exchange type | Durable `topic` exchange |
-| Routing key | `registration.requested.v1` |
-| Registration-request queue | `allocation.registration-requests.v1` (durable) |
-| Failure parking queue | `allocation.failed-registration-requests.v1` (durable) |
-| Event delivery | Persistent JSON messages with `MessageId`, `Type`, and `ContentType` properties |
-| Publisher | Publisher confirms and `mandatory` routing enabled |
-| Consumer | Manual ACK; `prefetchCount = 1`; asynchronous dispatch concurrency of one |
+| Direction | Routing key | Consumer-owned queue | Parking queue |
+|---|---|---|---|
+| Registration → Allocation | `registration.requested.v1` | `allocation.registration-requests.v1` | `allocation.failed-registration-requests.v1` |
+| Allocation → Registration | `allocation.decided.v1` | `registration.allocation-results.v1` | `registration.failed-allocation-results.v1` |
 
-The Registration publisher declares the event exchange, registration-request queue, and binding when establishing its broker connection. The Allocation consumer also declares the same compatible exchange, queue, and binding when starting a consumer session. This reduces dependence on the order in which the services start. Both declarations must remain compatible.
+The local-development virtual host is `conferenceproflow`. Both publishers use JSON messages with AMQP `MessageId`, `Type`, and `ContentType`, persistence, publisher confirmations, and mandatory routing. Both consumers use manual ACK, `prefetchCount = 1`, and asynchronous single-dispatch processing. The source for each durable queue and binding is its **consumer service**; each side declares the shared exchange compatibly.
 
-The Allocation consumer declares its own parking queue. It republishes malformed or conflicting deliveries to that queue via the default exchange on a separate publisher-confirm channel. The original delivery is acknowledged **only after** the parking publication is confirmed.
+For malformed metadata/JSON and conflicting identities or decisions, a consumer publishes the original delivery to its own parking queue using a **separate publisher-confirm channel** and the default RabbitMQ exchange. The original delivery is ACKed **only after** successful confirmed parking publication. The Registration result consumer also parks an `UnknownRegistration` outcome for investigation, since the Registration-side request was committed before its original event was published.
 
-Parking is not an atomic move. A crash between confirmed parking publication and original ACK can cause duplicate parked deliveries. There is no automated replay, deduplication, or operator workflow for parked messages yet. The parking queue should be restricted to trusted operators.
+If database persistence, broker operations, or parking confirmation fails, the consumer must not ACK an incompletely handled delivery. The session is restarted and unacknowledged deliveries are eligible for redelivery. The Registration result consumer includes a bounded 15-second parking-publish timeout.
 
-Integration tests use isolated RabbitMQ Testcontainers and may use the default test virtual host instead of the local-development virtual host.
+**Caveat:** Parking and the original ACK are not one atomic operation. A crash between the two can duplicate parked deliveries. Parking queues are not an automated dead-letter recovery or audited replay workflow. Tests use isolated RabbitMQ Testcontainers and may use their own virtual hosts.
 
-## 8. SQL Inbox, Idempotent Intake, and Eventual Consistency
+## 8. SQL Inbox, Idempotent Processing, and Eventual Consistency
 
 Registration and Allocation maintain separate databases and do not share a distributed SQL transaction.
 
@@ -228,7 +274,7 @@ The database enforces uniqueness on `Id` and `RegistrationId`. `InboxReceiveServ
 | `Conflict` | Inconsistent existing message or registration identity | Park, then ACK if parking is confirmed |
 | SQL or other unexpected error | Durable acceptance not established | No ACK; close/restart session and permit redelivery |
 
-The unique Inbox registration constraint prevents duplicate **receipt**. The RabbitMQ consumer itself does not update `ReservedCount` or create allocations. A **separate** allocation processor handles those writes in the Allocation database. Neither component currently updates Registration status in the Registration database.
+The unique Inbox registration constraint prevents duplicate **receipt**. The RabbitMQ request consumer itself does not update `ReservedCount` or create allocations. A **separate** allocation processor handles those writes in the Allocation database. Registration status is then updated independently when the result event reaches the Registration consumer.
 
 ### Failure Handling and Recovery
 
@@ -238,19 +284,35 @@ If SQL persistence fails, the delivery is not acknowledged. Closing the RabbitMQ
 
 Invalid JSON, invalid message metadata, and conflicting identities are preserved in the durable parking queue after successful publication confirmation. This is **not** a replacement for production-grade dead-letter handling, audited recovery, or monitoring.
 
-### Eventual Consistency
+### End-to-End Eventual Consistency (M2.6)
 
-A registration remains `Pending` in the Registration database throughout the currently implemented flow, **even after Allocation makes a business decision**. The current sequence is:
+1. Registration API commits a `Pending` registration and `RegistrationRequestedV1` row in the Registration Outbox.
+2. The Registration publisher sends `registration.requested.v1` to RabbitMQ.
+3. The Allocation request consumer validates the event, persists an Allocation Inbox row and ACKs it (or recognizes a safe duplicate).
+4. `AllocationInboxProcessorService` selects pending Inbox rows with an existing `SessionInventory` and delegates to `AllocationProcessingService`.
+5. Allocation decides Confirmed/Rejected while respecting capacity; the result event is stored in `AllocationOutboxMessages` for reliable publication.
+6. `AllocationOutboxPublisherService` publishes `allocation.decided.v1` to the Registration-owned results queue and marks the Outbox row published after broker confirmation.
+7. `AllocationResultConsumerService` validates the event and invokes `AllocationResultReconciliationService` in a fresh DI scope.
+8. Reconciliation stores `AllocationResultInboxMessage` and updates `Registration.Status` from `Pending` to `Confirmed` or `Rejected` within one Registration DB `SaveChangesAsync` transaction. The consumer ACKs only after a successful/compatible outcome.
 
-1. Registration API atomically persists a `Pending` registration and Outbox message.
-2. The Outbox publisher sends `registration.requested.v1` to RabbitMQ.
-3. Allocation consumer validates and durably records the request in `InboxMessages` and then ACKs it (or safely handles a duplicate).
-4. `AllocationInboxProcessorService` polls for pending Inbox rows with a provisioned SessionInventory and delegates each eligible request to `AllocationProcessingService`.
-5. `AllocationProcessingService` enforces capacity and persists the Confirmed/Rejected Allocation, inventory change (when confirmed), and Inbox completion **atomically in the Allocation database**.
-6. **Not implemented yet:** Allocation publishes a reliable allocation-result event.
-7. **Not implemented yet:** Registration consumes the result and changes its registration state to `Confirmed` or `Rejected`.
+The Registration API may return `201 Created` with `Pending` before the asynchronous decision is available. `GET /api/registrations/{id}` later returns the final status. **No distributed transaction** spans both databases. A request-consumer ACK proves durable request intake; an Allocation result-consumer ACK proves durable reconciliation or a safe duplicate; a broker publisher confirm proves acceptance by the broker, not final business completion.
 
-RabbitMQ ACK confirms durable intake (step 3), not the later business allocation decision (step 5). `ProcessedAtUtc` records completion of the allocation processor, not AMQP delivery. No distributed transaction spans the Registration and Allocation databases.
+### Registration Result Inbox and Reconciliation (M2.6D)
+
+The Registration database table `AllocationResultInboxMessages` stores `Id` (= result `MessageId`), `AllocationId`, `RegistrationId`, `SessionId`, decision `Status`, `RejectionReason`, `OccurredAtUtc`, and `ReceivedAtUtc`. Its primary key is `Id`; unique indexes on `AllocationId` and `RegistrationId` defend against conflicting decisions. The Registration database owns this receipt and the related status transition.
+
+`AllocationResultReconciliationService.ApplyAsync` handles:
+
+| Outcome | Meaning | RabbitMQ result-consumer action |
+|---|---|---|
+| `Applied` | Decision and durable receipt committed together | ACK |
+| `DuplicateMessage` | The same event ID and identical contents have already been recorded | ACK |
+| `DuplicateDecision` | Same compatible business decision arrived under another message ID | ACK |
+| `Conflict` | Different/contradictory decision, registration/session mapping, or message identity | Confirmed parking publication, then ACK |
+| `UnknownRegistration` | Result references a Registration that does not exist | Confirmed parking publication, then ACK; manual investigation |
+| Unexpected SQL / infrastructure failure | Durable reconciliation is not established | No ACK; restart session and permit redelivery |
+
+Known statuses use the integration-event strings `confirmed` / `rejected`, while Registration API responses expose `Confirmed` / `Rejected`. If a Registration already has an incompatible final status, it is not overwritten. On recognized SQL unique-key races, reconciliation clears stale EF tracking state and re-evaluates against committed data; it does not blindly save an old state.
 
 ### M2.5 — Automated, Capacity-Safe Allocation Processing
 
@@ -267,7 +329,7 @@ RabbitMQ ACK confirms durable intake (step 3), not the later business allocation
 - If capacity is exhausted, persist a **Rejected** Allocation with reason `Session capacity reached.` without incrementing `ReservedCount`.
 - Set `InboxMessage.ProcessedAtUtc` only as part of successful persistence of that business decision.
 
-The inventory update, Allocation insert, and Inbox completion are tracked in **one AllocationDbContext** and written in a single EF Core `SaveChangesAsync` transaction. SQL Server constraints enforce `0 <= ReservedCount <= Capacity`, and `Allocation.RegistrationId` is unique. `SessionInventory.RowVersion` detects stale concurrent inventory updates. A bounded retry clears tracked state and reevaluates the whole decision after recognized concurrency conflicts, duplicate-key races, or SQL Server deadlocks; it does not blindly repeat a stale update.
+The inventory update, Allocation insert, and Inbox completion are tracked in **one AllocationDbContext** and written in a single EF Core `SaveChangesAsync` transaction. The result Outbox write belongs in the same consistency boundary so a persisted decision cannot lose its outgoing result event; confirm this invariant in the source and test suite before merging M2.6. SQL Server constraints enforce `0 <= ReservedCount <= Capacity`, and `Allocation.RegistrationId` is unique. `SessionInventory.RowVersion` detects stale concurrent inventory updates. A bounded retry clears tracked state and reevaluates the whole decision after recognized concurrency conflicts, duplicate-key races, or SQL Server deadlocks; it does not blindly repeat a stale update.
 
 The polling worker runs sequentially within **one instance**. Its configurable batch size is not parallel worker concurrency. Separate SQL concurrency tests exercise contention across independent DbContexts, including 100 competing registrations for 10 seats. Those tests demonstrate tested safety conditions, not a guarantee of scale-out orchestration under every workload.
 
@@ -284,7 +346,7 @@ Configuration defaults (in Worker `appsettings.json`):
 }
 ```
 
-For the local end-to-end demonstration, enable the processor and provision inventory using `docs/ALLOCATION_E2E_SEED.sql` for a newly created Registration session. This is **development-only setup**, not automated cross-service inventory synchronization. See `docs/ALLOCATION_E2E_DEMO.md` and `docs/ALLOCATION_E2E.http`.
+For the local end-to-end demonstration, enable the processor and provision inventory using `docs/ALLOCATION_E2E_SEED.sql` for a newly created Registration session. This is **development-only setup**, not automated cross-service inventory synchronization. Also enable the result publisher (`AllocationOutboxPublisher:Enabled=true`) and Registration-side result consumer (`AllocationResultConsumer:Enabled=true`) alongside the original two publishers/consumers. See `docs/ALLOCATION_E2E_DEMO.md` and `docs/ALLOCATION_E2E.http`.
 
 ## 9. Automated Testing
 
@@ -299,6 +361,12 @@ Registration integration tests use SQL Server and isolated RabbitMQ Testcontaine
 - Temporary broker unavailability, recovery, unroutable messages, and failure isolation.
 - Duplicate publication scenarios and deferred retries.
 - Quarantine of permanently invalid known payloads.
+
+### M2.6 Allocation Result Outbox and Registration Reconciliation Tests
+
+Dedicated automated tests cover result-event contract validation, Allocation-side result Outbox records and publication behavior, and Registration-side reconciliation. The Registration SQL integration tests exercise final status transitions, duplicate-message and duplicate-decision idempotency, conflicting decisions, unknown registrations, and durable Inbox persistence. The Registration RabbitMQ consumer integration tests exercise genuine RabbitMQ and SQL Server behavior for normal Confirmed/Rejected results, duplicate handling, malformed/contradictory results, parking, restart recovery, and transient database/broker failures.
+
+The original M2.5 tests continue to cover request intake and capacity safety. Successful component and integration tests do **not**, by themselves, demonstrate a single automated full cross-service HTTP test.
 
 ### Allocation SQL Integration Tests
 
@@ -331,11 +399,11 @@ SQL Server Testcontainers tests additionally verify:
 - 100 requests competing for 10 seats with an eight-operation concurrency cap: 10 confirmed, 90 rejected, with capacity intact.
 - The Inbox polling BackgroundService: automatic allocation, batch processing, delayed inventory provisioning, restart recovery, and per-message failure isolation.
 
-A separate **manual cross-service** demonstration is documented in `docs/ALLOCATION_E2E_DEMO.md`. The current automated suites do not claim a single full-system HTTP → RabbitMQ → SQL business E2E test.
+A separate **manual cross-service** demonstration is documented in `docs/ALLOCATION_E2E_DEMO.md`. During M2.6E the user verified the two-seat/three-registration scenario end to end (`Confirmed`, `Confirmed`, `Rejected`), corresponding results in both databases, and a later Worker-stop/restart scenario. The current automated suites do not claim a single full-system HTTP → RabbitMQ → SQL business E2E test.
 
 ## 10. Operational Visibility
 
-The publisher emits structured logs for startup, RabbitMQ connection/topology initialization, publication success, retryable failures, and quarantined messages. The Allocation consumer logs consumer registration/reconnection, accepted requests, and parked or failed deliveries.
+Both Outbox publishers emit structured logs for startup, broker connection/topology, publication, retries and quarantined messages. Both consumers log registration/reconnection, accepted results and parked/failed deliveries. The Allocation Inbox processor logs batch-processing results. These are development-time observability signals, not a substitute for metrics and production alerting.
 
 Trusted developers and operators can inspect the `OutboxMessages` table to monitor:
 
@@ -384,7 +452,7 @@ LEFT JOIN dbo.InboxMessages AS m ON m.RegistrationId = a.RegistrationId
 ORDER BY a.CreatedAtUtc DESC;
 ```
 
-`Allocation.Status = 1` means Confirmed and `2` means Rejected. These are **Allocation-side decisions**; Registration-side status still remains Pending (`0`). The RabbitMQ Management UI exposes request/parking queue counts and active consumers. A `Ready = 0` queue only reflects messaging state, not proof of successful business allocation.
+`Allocation.Status = 1` means Confirmed and `2` means Rejected. Registration initially uses `Pending = 0`, and after result reconciliation its status becomes `Confirmed = 1` or `Rejected = 2`. The RabbitMQ Management UI exposes request/result/parking queue counts and active consumers. A `Ready = 0` queue only reflects messaging state, not proof of successful business reconciliation.
 
 There is not yet a dedicated production monitoring dashboard, alerting policy, audited quarantine/parking recovery operation, or authenticated administrative replay tooling.
 
@@ -402,17 +470,17 @@ There is not yet a dedicated production monitoring dashboard, alerting policy, a
 - Pending Inbox messages **are automatically processed into capacity-safe decisions** only when the Allocation Inbox processor is enabled **and** a matching SessionInventory exists. Inventory provisioning/synchronization is not yet automated; a development-only SQL seed is available for the demo.
 - Polling and in-memory error cooldowns are scoped to one Worker instance; no durable claims/leases coordinate multiple allocation processor replicas.
 - The local end-to-end demo is manual; no single automated cross-service HTTP → RabbitMQ → allocation regression scenario is currently claimed.
-- Allocation-result event publishing and Registration status reconciliation are not implemented.
+- Allocation-result publication and Registration reconciliation are implemented, but runtime recovery and all failure modes are not comprehensively proven by the manual demo alone.
 - The Registration API has additional development-stage access-control/session-publication limitations documented elsewhere.
 
 The project is **production-aware**, with selected production-ready engineering practices; it is not yet a fully production-ready distributed system.
 
 ## 12. Next Steps
 
-1. Introduce explicit, service-owned session inventory provisioning synchronized from Registration without cross-database writes by the application.
-2. Publish versioned allocation-result events reliably from Allocation and process them in Registration to update `Pending` registrations.
-3. Add an automated full-system HTTP → Outbox → RabbitMQ → Inbox → Allocation end-to-end regression test.
+1. Finish M2.6 documentation, inspect the final Allocation decision → result Outbox atomic-write path, run the full Release regression suite and merge the feature PR after CI passes.
+2. Introduce explicit, service-owned session inventory provisioning synchronized from Registration without one service writing into the other service's database.
+3. Add an automated full-system HTTP → Outbox → RabbitMQ → Inbox → Allocation → result Outbox → RabbitMQ → Registration reconciliation regression test when its maintenance cost is justified.
 4. Enforce session-publication/eligibility rules, authentication, authorization, and production-grade secret management.
-5. Consider durable work claims, replay tooling, metrics, alerting, and multiple-replica coordination when justified by real deployment requirements.
+5. Consider durable work claims, audited replay tooling, metrics/alerting, and multi-replica coordination for real deployment requirements.
 
-The architecture prioritizes data consistency, explicit failure handling, testability, and reproducible local development without paid infrastructure.
+The architecture prioritizes consistency, explicit failure handling, testability, and reproducible local development without paid infrastructure. Its scope remains **production-aware**, not a claim of comprehensive production readiness.

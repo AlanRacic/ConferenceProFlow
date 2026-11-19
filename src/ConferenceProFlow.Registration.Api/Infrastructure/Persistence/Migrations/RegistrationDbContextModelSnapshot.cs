@@ -119,6 +119,7 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<int>("Status")
+                        .HasMaxLength(20)
                         .HasColumnType("int");
 
                     b.Property<DateTimeOffset>("UpdatedAtUtc")
@@ -135,6 +136,44 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                         {
                             t.HasCheckConstraint("CK_Registrations_Status", "[Status] IN (0, 1, 2)");
                         });
+                });
+
+            modelBuilder.Entity("ConferenceProFlow.Registration.Api.Infrastructure.Inbox.AllocationResultInboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AllocationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset>("ReceivedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("RegistrationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("RejectionReason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AllocationId")
+                        .IsUnique();
+
+                    b.HasIndex("RegistrationId")
+                        .IsUnique();
+
+                    b.ToTable("AllocationResultInboxMessages", (string)null);
                 });
 
             modelBuilder.Entity("ConferenceProFlow.Registration.Api.Infrastructure.Outbox.OutboxMessage", b =>
@@ -201,6 +240,15 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                     b.HasOne("ConferenceProFlow.Registration.Api.Domain.Entities.ConferenceSession", null)
                         .WithMany()
                         .HasForeignKey("SessionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ConferenceProFlow.Registration.Api.Infrastructure.Inbox.AllocationResultInboxMessage", b =>
+                {
+                    b.HasOne("ConferenceProFlow.Registration.Api.Domain.Entities.Registration", null)
+                        .WithMany()
+                        .HasForeignKey("RegistrationId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

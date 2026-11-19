@@ -1,4 +1,5 @@
 ﻿using ConferenceProFlow.Registration.Api.Domain.Entities;
+using ConferenceProFlow.Registration.Api.Infrastructure.Inbox;
 using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using Microsoft.EntityFrameworkCore;
 using RegistrationEntity = ConferenceProFlow.Registration.Api.Domain.Entities.Registration;
@@ -21,6 +22,8 @@ public sealed class RegistrationDbContext : DbContext
 
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
+    public DbSet<AllocationResultInboxMessage> AllocationResultInboxMessages => Set<AllocationResultInboxMessage>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -30,6 +33,7 @@ public sealed class RegistrationDbContext : DbContext
         ConfigureParticipants(modelBuilder);
         ConfigureRegistrations(modelBuilder);
         ConfigureOutboxMessages(modelBuilder);
+        ConfigureAllocationResultInboxMessages(modelBuilder);
     }
 
     private static void ConfigureConferences(ModelBuilder modelBuilder)
@@ -124,6 +128,7 @@ public sealed class RegistrationDbContext : DbContext
 
             entity.Property(x => x.Status)
                 .HasConversion<int>()
+                .HasMaxLength(20)
                 .IsRequired();
 
             entity.Property(x => x.RejectionReason)
@@ -193,6 +198,30 @@ public sealed class RegistrationDbContext : DbContext
                 x.OccurredAtUtc
             })
             .HasDatabaseName("IX_OutboxMessages_PublishStatus");
+        });
+    }
+
+    private static void ConfigureAllocationResultInboxMessages(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<AllocationResultInboxMessage>(entity =>
+        {
+            entity.ToTable("AllocationResultInboxMessages");
+
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Id)
+                .ValueGeneratedNever();
+
+            entity.HasIndex(x => x.AllocationId)
+                .IsUnique();
+
+            entity.HasIndex(x => x.RegistrationId)
+                .IsUnique();
+
+            entity.HasOne<RegistrationEntity>()
+                .WithMany()
+                .HasForeignKey(x => x.RegistrationId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

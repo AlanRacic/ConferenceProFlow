@@ -10,7 +10,7 @@ GO
 SET NOCOUNT ON;
 
 -- Paste `id` from the `demoCreateSession` HTTP response below.
-DECLARE @SessionIdText nvarchar(36) = N'32d59e23-726f-4366-bc8a-083f26f764c0';
+DECLARE @SessionIdText nvarchar(36) = N'PASTE-SESSION-GUID-HERE';
 DECLARE @SessionId uniqueidentifier = TRY_CONVERT(uniqueidentifier, @SessionIdText);
 DECLARE @Capacity int = 2;
 

@@ -1,4 +1,5 @@
 ﻿using ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence;
+using ConferenceProFlow.Allocation.Worker.Messaging.Outbox;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using AllocationEntity = ConferenceProFlow.Allocation.Worker.Domain.Entities.Allocation;
@@ -9,8 +10,7 @@ public sealed class AllocationProcessingService
 {
     private const string CapacityReachedReason = "Session capacity reached.";
 
-    // A single attempt may lose a race with another allocation processor.
-    // Retry the entire decision, not just the failed SaveChanges call.
+    // Retry the whole decision after a recognized concurrency conflict, never only the stale SaveChanges call.
     private const int MaxProcessingAttempts = 16;
 
     private readonly AllocationDbContext _db;
@@ -35,13 +35,14 @@ public sealed class AllocationProcessingService
             {
                 return await ProcessAttemptAsync(messageId, cancellationToken);
             }
-            catch (Exception exception) when (attempt < MaxProcessingAttempts && IsRetryableConcurrencyFailure(exception))
+            catch (Exception exception) when (
+                attempt < MaxProcessingAttempts &&
+                IsRetryableConcurrencyFailure(exception))
             {
-                // SaveChanges rolls back its transaction on failure. The current DbContext still tracks stale inventory values and an unsaved allocation, so discard them before re-evaluating the request.
+                // Failed SaveChanges is rolled back; remove stale entities and the uncommitted outbox entry before calculating a fresh decision.
                 _db.ChangeTracker.Clear();
 
                 var delayMs = Math.Min(attempt * 25 + Random.Shared.Next(10, 40), 300);
-
                 await Task.Delay(TimeSpan.FromMilliseconds(delayMs), cancellationToken);
             }
         }
@@ -55,9 +56,7 @@ public sealed class AllocationProcessingService
         CancellationToken cancellationToken)
     {
         var inboxMessage = await _db.InboxMessages
-            .SingleOrDefaultAsync(
-                x => x.Id == messageId,
-                cancellationToken);
+            .SingleOrDefaultAsync(x => x.Id == messageId, cancellationToken);
 
         if (inboxMessage is null)
         {
@@ -66,6 +65,7 @@ public sealed class AllocationProcessingService
 
         if (inboxMessage.ProcessedAtUtc is not null)
         {
+            // Existing allocations from before M2.6 are intentionally not auto-backfilled here; see M2.6B documentation.
             return AllocationProcessingResult.AlreadyProcessed;
         }
 
@@ -82,7 +82,18 @@ public sealed class AllocationProcessingService
                 throw new InvalidOperationException("Existing allocation belongs to a different session.");
             }
 
-            // Recovery path: an allocation already exists, so never reserve another seat. Completing the Inbox is the only required write.
+            // Recovery: an allocation already exists. Do not reserve another seat.
+            // Ensure its result event exists before completing the pending Inbox.
+            var hasOutboxEvent = await _db.AllocationOutboxMessages
+                .AnyAsync(
+                    x => x.AllocationId == existingAllocation.Id,
+                    cancellationToken);
+
+            if (!hasOutboxEvent)
+            {
+                _db.AllocationOutboxMessages.Add(AllocationOutboxMessageFactory.Create(existingAllocation));
+            }
+
             inboxMessage.MarkProcessed(DateTimeOffset.UtcNow);
             await _db.SaveChangesAsync(cancellationToken);
 
@@ -96,8 +107,7 @@ public sealed class AllocationProcessingService
 
         if (inventory is null)
         {
-            // Unknown inventory is not the same as a full session.
-            // Leave this Inbox record pending until capacity is configured.
+            // Missing inventory is not an allocation rejection.
             return AllocationProcessingResult.WaitingForInventory;
         }
 
@@ -116,10 +126,12 @@ public sealed class AllocationProcessingService
                 processedAtUtc);
 
         _db.Allocations.Add(allocation);
+        _db.AllocationOutboxMessages.Add(
+            AllocationOutboxMessageFactory.Create(allocation));
         inboxMessage.MarkProcessed(processedAtUtc);
 
-        // EF Core commits inventory, allocation and Inbox updates atomically.
-        // For confirmed seats, SQL Server RowVersion detects stale inventory.
+        // ONE SaveChanges transaction for inventory, allocation, inbox and outbox.
+        // The outbox event remains pending for the publisher introduced in M2.6C.
         await _db.SaveChangesAsync(cancellationToken);
 
         return reserved
@@ -134,7 +146,6 @@ public sealed class AllocationProcessingService
             return true;
         }
 
-        // Two processors handling the same registration can race on the unique RegistrationId index. SQL deadlocks are also retryable.
         if (exception is DbUpdateException
             {
                 InnerException: SqlException sqlException
