@@ -4,6 +4,7 @@ using ConferenceProFlow.Registration.Api.Features.Conferences;
 using ConferenceProFlow.Registration.Api.Infrastructure.Inbox;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
+using ConferenceProFlow.Registration.Api.Messaging.Consumers;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -22,11 +23,14 @@ builder.Services.AddDbContext<RegistrationDbContext>(
         options.UseSqlServer(connectionString);
     });
 
-// Business reconciliation is scoped; the RabbitMQ consumer comes in M2.6D2.
 builder.Services.AddScoped<AllocationResultReconciliationService>();
 
 if (builder.Configuration.GetValue<bool>("OutboxPublisher:Enabled"))
     builder.Services.AddHostedService<OutboxPublisherService>();
+
+// Disabled by default. Enable locally after applying the M2.6D1 Registration migration.
+if (builder.Configuration.GetValue<bool>("AllocationResultConsumer:Enabled"))
+    builder.Services.AddHostedService<AllocationResultConsumerService>();
 
 var app = builder.Build();
 
