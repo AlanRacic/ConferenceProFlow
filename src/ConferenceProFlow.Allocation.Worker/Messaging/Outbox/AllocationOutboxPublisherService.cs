@@ -1,6 +1,5 @@
 ﻿using System.Text;
 using ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence;
-using ConferenceProFlow.Allocation.Worker.Messaging;
 using Microsoft.EntityFrameworkCore;
 using RabbitMQ.Client;
 
@@ -90,7 +89,7 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
 
     private async Task PublishPendingAsync(CancellationToken cancellationToken)
     {
-        using var scope = _scopeFactory.CreateScope();
+        await using var scope = _scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AllocationDbContext>();
         var now = DateTimeOffset.UtcNow;
 
