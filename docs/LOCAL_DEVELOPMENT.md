@@ -1,6 +1,6 @@
 # ConferenceProFlow — Local Development
 
-> Updated for **M2.6**: bidirectional RabbitMQ messaging, allocation-result publishing, Registration reconciliation, and a reproducible local end-to-end demo. This describes the feature-branch implementation; it does not claim production deployment readiness.
+> Updated through **M3.2**: the M2.6 bidirectional RabbitMQ workflow remains intact; optional Apache Kafka KRaft infrastructure, reproducible topic initialization and CLI smoke/recovery checks are documented. M3.2 adds **infrastructure only**: no Kafka producer, Analytics Worker or analytics database is implemented yet. This does not claim production deployment readiness.
 
 ## Prerequisites
 
@@ -166,7 +166,7 @@ The API is not suitable for public production deployment. These limitations are 
 
 The local environment is designed to be reproducible without paid cloud services.
 
-The existing local infrastructure includes SQL Server and RabbitMQ. Additional technologies (such as Kafka or observability components) will be considered only when justified by a specific implementation goal; they are not required to run the current solution.
+The default local infrastructure includes SQL Server and RabbitMQ. Starting in M3.2, optional **Kafka** infrastructure is available through Docker Compose `--profile kafka`, but it is **not required** to run the existing Registration/Allocation solution. Other components (such as observability tooling) should be introduced only when justified by a specific implementation goal. See [`KAFKA_LOCAL_DEVELOPMENT.md`](KAFKA_LOCAL_DEVELOPMENT.md).
 
 ---
 
@@ -1047,8 +1047,44 @@ To isolate Registration reconciliation and result-consumer tests:
 dotnet test tests/ConferenceProFlow.Registration.IntegrationTests/ConferenceProFlow.Registration.IntegrationTests.csproj --configuration Release --filter "FullyQualifiedName~AllocationResultReconciliationIntegrationTests|FullyQualifiedName~AllocationResultConsumerIntegrationTests"
 ```
 
-All test results must actually pass in the local environment / CI; this document does not substitute for running them. The cross-service manual demo is not presented as a fully automated end-to-end test. Commit and push documentation via Visual Studio **Git Changes**, using the existing M2.6 feature branch; create the final PR and close the issue only after final verification.
+All test results must actually pass in the local environment / CI; this document does not substitute for running them. The cross-service manual demo is not presented as a fully automated end-to-end test. Use Visual Studio **Git Changes** for commits and pushes on the appropriate feature branch. Create the final PR and close its issue only after final verification.
 
 ### Operational boundaries
 
 The application does not yet implement automatic inventory provisioning, production authentication/authorization, distributed publisher/processor leasing, administrative replay with audit trails, or comprehensive metrics/alerting. Manual SQL inventory seeding is for development only. Multiple consumer or publisher instances, repeated broker delivery and infrastructure failures require appropriate coordination and monitoring in a production deployment. The current implementation is **production-aware**, not a claim of full production readiness.
+
+
+
+## M3.2 — Optional Local Kafka Infrastructure
+
+Apache Kafka 4.4.0 is available as the optional `kafka` Docker Compose profile. It is intentionally separate from the existing M2 RabbitMQ operational workflow. The Kafka service uses a single-node KRaft configuration and persistent Docker volume `kafka_data`, with localhost-only host access. This is **local development infrastructure**, not a production-ready Kafka cluster.
+
+From the repository root, check and start the Compose profile:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml --profile kafka config --quiet
+```
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml --profile kafka up -d
+```
+
+Initialize the versioned analytics topic and the separate CLI-smoke topic using the tracked, repeatable PowerShell script:
+
+```powershell
+.\infrastructure\init-kafka-topics.ps1
+```
+
+If PowerShell blocks script execution with `running scripts is disabled on this system`, inspect the repository script and use the following **process-only** workaround (no permanent Execution Policy change):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infrastructure\init-kafka-topics.ps1
+```
+
+Use execution-policy overrides only for scripts you trust, and comply with organization-managed security policies.
+
+**Read the full [`KAFKA_LOCAL_DEVELOPMENT.md`](KAFKA_LOCAL_DEVELOPMENT.md) guide** for broker readiness, host versus Docker listeners, topic/retention verification, producer-consumer smoke checks, container-recreation persistence checks and troubleshooting. For the architecture of *future* Kafka business-event publishing, see [`KAFKA_ANALYTICS_DESIGN.md`](KAFKA_ANALYTICS_DESIGN.md).
+
+Do not put generic smoke JSON into the operational topic `conferenceproflow.registration-finalized.v1`; use `conferenceproflow.kafka-smoke.v1`. The operational topic may already contain a test event from the initial M3.2 manual exercise. It must be consciously handled (validation/quarantine or an explicitly authorized development-only reset) before a new Analytics consumer processes historical records.
+
+The existing .NET applications continue to use RabbitMQ; **no production Kafka integration is implemented at M3.2**. Avoid `docker compose down -v`, which removes named volumes belonging to all services in this Compose project.
