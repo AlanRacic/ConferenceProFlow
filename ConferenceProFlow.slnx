@@ -2,6 +2,7 @@
   <Folder Name="/Solution Items/">
     <File Path="../../Users/nikra/Desktop/docs/ALLOCATION_RESULT_EVENTS.md" />
     <File Path="docs/ARCHITECTURE.md" />
+    <File Path="docs/KAFKA_ANALYTICS_DESIGN.md" />
     <File Path="docs/LOCAL_DEVELOPMENT.md" />
     <File Path="docs/MESSAGING_DESIGN.md" />
     <File Path="docs/PROJECT_CHARTER.md" />
