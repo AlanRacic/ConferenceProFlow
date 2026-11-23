@@ -1,6 +1,6 @@
 # ConferenceProFlow — Local Development
 
-> Updated through **M3.2**: the M2.6 bidirectional RabbitMQ workflow remains intact; optional Apache Kafka KRaft infrastructure, reproducible topic initialization and CLI smoke/recovery checks are documented. M3.2 adds **infrastructure only**: no Kafka producer, Analytics Worker or analytics database is implemented yet. This does not claim production deployment readiness.
+> Updated through **M3.3**: the M2.6 bidirectional RabbitMQ workflow remains intact; M3.2 adds local Apache Kafka infrastructure and M3.3 adds a Registration-side `RegistrationFinalizedV1` Analytics SQL Outbox and Kafka background publisher. **No Analytics Worker or analytics database is implemented yet.** This does not claim production readiness.
 
 ## Prerequisites
 
@@ -1087,4 +1087,57 @@ Use execution-policy overrides only for scripts you trust, and comply with organ
 
 Do not put generic smoke JSON into the operational topic `conferenceproflow.registration-finalized.v1`; use `conferenceproflow.kafka-smoke.v1`. The operational topic may already contain a test event from the initial M3.2 manual exercise. It must be consciously handled (validation/quarantine or an explicitly authorized development-only reset) before a new Analytics consumer processes historical records.
 
-The existing .NET applications continue to use RabbitMQ; **no production Kafka integration is implemented at M3.2**. Avoid `docker compose down -v`, which removes named volumes belonging to all services in this Compose project.
+The M2 operational path continues to use RabbitMQ. **M3.3 additionally implements optional Kafka publication from the Registration API**; this M3.2 section documents the infrastructure baseline. Avoid `docker compose down -v`, which removes named volumes belonging to all services in this Compose project.
+
+
+## M3.3 — Registration Finalization Event Publishing (Kafka)
+
+The Registration API now records `RegistrationFinalizedV1` events in a dedicated, durable SQL `AnalyticsOutboxMessages` table when a registration **actually transitions** from `Pending` to `Confirmed` or `Rejected`. The event, Registration status, and Allocation Result Inbox record are persisted in one local SQL transaction. A separately enabled `KafkaAnalyticsOutboxPublisherService` publishes pending events to Kafka and records Kafka-specific acknowledgement state. This does **not** replace the RabbitMQ operational workflow.
+
+The **complete step-by-step configuration, SQL verification, Kafka CLI checks, failure/recovery scenario and tests** are in [KAFKA_PUBLISHING.md](KAFKA_PUBLISHING.md). Read that guide before running the M3.3 demo.
+
+### Quick start (from repository root)
+
+Start the full local infrastructure and initialize Kafka topics if necessary:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml --profile kafka up -d
+```
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infrastructure\init-kafka-topics.ps1
+```
+
+Only use the execution-policy override for a script you have reviewed and trust; comply with organization security policies.
+
+In **Registration API → Manage User Secrets**, preserve existing SQL/RabbitMQ credentials and configure these additional keys:
+
+```json
+{
+  "Kafka": {
+    "BootstrapServers": "localhost:9092",
+    "RegistrationFinalizedTopic": "conferenceproflow.registration-finalized.v1"
+  },
+  "KafkaAnalyticsPublisher": { "Enabled": true }
+}
+```
+
+This is a partial JSON **example**, not an instruction to replace existing User Secrets. Kafka publishing is disabled by default and requires the `KafkaAnalyticsPublisher:Enabled` flag. Keep the Registration RabbitMQ publisher/result-consumer and Allocation Worker services enabled for full end-to-end verification.
+
+The `AddRegistrationAnalyticsOutbox` migration has already been applied in the M3.3 development workflow. New developers should apply existing Registration EF Core migrations according to **Section 4: Apply Database Migrations** above; do not create another migration with the same name.
+
+### Kafka Publisher integration tests
+
+Requires Docker Desktop running:
+
+```powershell
+dotnet build ConferenceProFlow.slnx --configuration Release
+```
+
+```powershell
+dotnet test tests/ConferenceProFlow.Registration.IntegrationTests/ConferenceProFlow.Registration.IntegrationTests.csproj --configuration Release --no-build --filter "FullyQualifiedName~KafkaAnalyticsOutboxPublisherIntegrationTests" --verbosity normal
+```
+
+There are **four** Publisher integration test cases: Confirmed, Rejected, unavailable Kafka/recovery, and Kafka ACK followed by injected publication-state SQL failure. The latter demonstrates intentional at-least-once behavior and stable event identity on retry. A separate M3.3B test suite covers the atomic status/Inbox/Analytics Outbox write.
+
+**Limitations:** single-active-instance Publisher, no complete automatic quarantine policy, Kafka duplicates possible after acknowledgement/SQL update gap, no M3.4 Analytics Consumer or analytics projections yet.

@@ -1,4 +1,5 @@
-﻿using ConferenceProFlow.Registration.Api.Domain.Enums;
+using ConferenceProFlow.Registration.Api.Domain.Enums;
+using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using ConferenceProFlow.Registration.Api.Messaging.Contracts;
 using Microsoft.EntityFrameworkCore;
@@ -85,6 +86,10 @@ public sealed class AllocationResultReconciliationService
         if (updatedAtUtc < registration.CreatedAtUtc)
             updatedAtUtc = registration.CreatedAtUtc;
 
+        // Only an actual Pending -> final transition produces an analytics event.
+        // Repeated or pre-finalized decisions must never generate a second event.
+        var isNewFinalization = registration.Status == RegistrationStatus.Pending;
+
         if (result.Status == AllocationDecidedV1.ConfirmedStatus)
         {
             if (registration.Status == RegistrationStatus.Rejected)
@@ -109,7 +114,20 @@ public sealed class AllocationResultReconciliationService
 
         _db.AllocationResultInboxMessages.Add(AllocationResultInboxMessage.Create(result, DateTimeOffset.UtcNow));
 
-        // Registration status and durable receipt commit together.
+        if (isNewFinalization)
+        {
+            // The actual committed Registration status is the analytics source of truth.
+            // Persist the complete payload and stable identity once, before Kafka publishing.
+            var finalStatus = result.Status == AllocationDecidedV1.ConfirmedStatus
+                ? RegistrationFinalizedV1.ConfirmedStatus
+                : RegistrationFinalizedV1.RejectedStatus;
+            var analyticsEvent = RegistrationFinalizedV1.Create(
+                registration.Id, registration.SessionId, finalStatus, updatedAtUtc);
+            _db.AnalyticsOutboxMessages.Add(AnalyticsOutboxMessage.FromEvent(analyticsEvent));
+        }
+
+        // EF Core relational SaveChanges is atomic: status, result Inbox and
+        // Analytics Outbox succeed or roll back together. No Kafka call here.
         await _db.SaveChangesAsync(cancellationToken);
         return AllocationResultReconciliationResult.Applied;
     }

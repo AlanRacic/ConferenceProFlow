@@ -6,8 +6,7 @@
 # Run each request in order in Visual Studio using "Send Request".
 # Requests automatically reuse IDs from earlier JSON responses; do NOT enter GUIDs into HTTP requests.
 # Participant emails contain a fresh generated GUID, allowing repeatable demos.
-# IMPORTANT: STOP after request 2. Seed capacity=2 in the Allocation database using
-# docs/ALLOCATION_E2E_SEED.sql; paste ONLY the new session ID into that SQL file.
+# IMPORTANT: STOP after request 2. Seed capacity=2 in the Allocation database using docs/ALLOCATION_E2E_SEED.sql; paste ONLY the new session ID into that SQL file.
 # After the seed succeeds, run requests 3-8; allow async consumers/publishers time to work.
 # Finally run GET requests 9-11. Expect TWO Confirmed and ONE Rejected in total.
 # Do not assume which particular participant gets Rejected; event order can differ.

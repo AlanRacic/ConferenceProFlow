@@ -1,4 +1,4 @@
-﻿using ConferenceProFlow.Registration.Api.Domain.Entities;
+using ConferenceProFlow.Registration.Api.Domain.Entities;
 using ConferenceProFlow.Registration.Api.Infrastructure.Inbox;
 using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using Microsoft.EntityFrameworkCore;
@@ -22,6 +22,8 @@ public sealed class RegistrationDbContext : DbContext
 
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
+    public DbSet<AnalyticsOutboxMessage> AnalyticsOutboxMessages => Set<AnalyticsOutboxMessage>();
+
     public DbSet<AllocationResultInboxMessage> AllocationResultInboxMessages => Set<AllocationResultInboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -33,6 +35,7 @@ public sealed class RegistrationDbContext : DbContext
         ConfigureParticipants(modelBuilder);
         ConfigureRegistrations(modelBuilder);
         ConfigureOutboxMessages(modelBuilder);
+        ConfigureAnalyticsOutboxMessages(modelBuilder);
         ConfigureAllocationResultInboxMessages(modelBuilder);
     }
 
@@ -128,7 +131,6 @@ public sealed class RegistrationDbContext : DbContext
 
             entity.Property(x => x.Status)
                 .HasConversion<int>()
-                .HasMaxLength(20)
                 .IsRequired();
 
             entity.Property(x => x.RejectionReason)
@@ -198,6 +200,55 @@ public sealed class RegistrationDbContext : DbContext
                 x.OccurredAtUtc
             })
             .HasDatabaseName("IX_OutboxMessages_PublishStatus");
+        });
+    }
+
+    private static void ConfigureAnalyticsOutboxMessages(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<AnalyticsOutboxMessage>(entity =>
+        {
+            entity.ToTable("AnalyticsOutboxMessages", table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_AnalyticsOutboxMessages_PublishAttempts", "[PublishAttempts] >= 0");
+            });
+
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Id).ValueGeneratedNever();
+
+            entity.Property(x => x.RegistrationId).IsRequired();
+            entity.HasIndex(x => x.RegistrationId)
+                .IsUnique()
+                .HasDatabaseName("UX_AnalyticsOutboxMessages_RegistrationId");
+
+            entity.HasOne<RegistrationEntity>()
+                .WithMany()
+                .HasForeignKey(x => x.RegistrationId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.Property(x => x.MessageType)
+                .HasMaxLength(160)
+                .IsRequired();
+
+            entity.Property(x => x.Payload)
+                .HasColumnType("nvarchar(max)")
+                .IsRequired();
+
+            entity.Property(x => x.OccurredAtUtc).IsRequired();
+            entity.Property(x => x.PublishedAtUtc);
+            entity.Property(x => x.PublishAttempts).IsRequired();
+            entity.Property(x => x.LastError).HasMaxLength(2000);
+            entity.Property(x => x.NextAttemptAtUtc);
+            entity.Property(x => x.QuarantinedAtUtc);
+
+            entity.HasIndex(x => new
+            {
+                x.PublishedAtUtc,
+                x.QuarantinedAtUtc,
+                x.NextAttemptAtUtc,
+                x.OccurredAtUtc
+            })
+            .HasDatabaseName("IX_AnalyticsOutboxMessages_PublishStatus");
         });
     }
 

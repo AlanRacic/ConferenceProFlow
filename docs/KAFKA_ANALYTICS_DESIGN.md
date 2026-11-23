@@ -2,8 +2,23 @@
 
 **Milestone:** M3 — Kafka & Event Analytics  
 **Work item:** M3.1 — Kafka Analytics Architecture  
-**Status:** Reviewed architecture proposal for M3.1 (implementation pending; no Kafka runtime or analytics service implemented yet)  
+**Status:** Reviewed architectural baseline; Kafka infrastructure (M3.2) and Registration-side finalization event/SQL Analytics Outbox/Kafka publisher (M3.3) implemented and locally verified. Analytics Worker/SQL projections/controlled replay remain future work.  
 **Baseline:** M2.6 Registration ↔ Allocation messaging via RabbitMQ, independent SQL Server databases, Transactional Outbox / Inbox, final registration reconciliation.
+
+## Implementation status after M3.3
+
+| Component | Status |
+|---|---|
+| Existing Registration ↔ Allocation RabbitMQ workflow | Implemented (M2.6) |
+| Local single-node Kafka KRaft infrastructure and topic initialization | Implemented (M3.2) |
+| `RegistrationFinalizedV1` event contract | Implemented (M3.3A) |
+| SQL `AnalyticsOutboxMessages`, final-status atomic write | Implemented (M3.3B) |
+| `KafkaAnalyticsOutboxPublisherService`, acknowledged publication + retry | Implemented (M3.3C–D) |
+| SQL/Kafka Publisher Testcontainers scenarios (including ACK/SQL fault) | Implemented and locally tested (M3.3E) |
+| Analytics Consumer, Analytics SQL projections, application offset commits | Planned (M3.4) |
+| Replay group / isolated projection rebuild | Planned (M3.5) |
+
+For current hands-on publishing configuration and local verification, see [Kafka Publishing](KAFKA_PUBLISHING.md). The architecture sections below preserve the original design rationale and intended full-M3 end state; **proposed Analytics Worker behavior is not yet implemented**.
 
 ## 1. Purpose and business requirement
 
