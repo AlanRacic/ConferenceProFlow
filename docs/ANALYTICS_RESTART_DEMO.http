@@ -1,0 +1,33 @@
+@baseUrl = https://localhost:7217
+@sessionId = REPLACE-WITH-FRESH-SESSION-GUID
+
+# ConferenceProFlow M3.4F — restart/catch-up demo (LOCAL DEVELOPMENT ONLY)
+# Prerequisite: Complete requests 1-11 of docs/ALLOCATION_E2E.http.
+# Replace @sessionId with the NEW session ID from that demo (capacity=2).
+# STOP ONLY the Analytics Worker before sending the following requests.
+# Keep Registration API, Allocation Worker, Kafka, RabbitMQ, and SQL Server running.
+# The session already has 2 confirmed + 1 rejected registrations, so this
+# fourth registration should be rejected and become a new Kafka finalization.
+
+### 1. Create a fourth participant, while Analytics Worker is stopped
+# @name analyticsRestartCreateParticipant
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Olivia Carter",
+  "email": "olivia.carter.analytics.{{$guid}}@example.com"
+}
+
+### 2. Register fourth participant for the SAME full session
+# @name analyticsRestartCreateRegistration
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{analyticsRestartCreateParticipant.response.body.$.id}}",
+  "sessionId": "{{sessionId}}"
+}
+
+### 3. Query fourth registration; repeat the GET until final (Rejected)
+GET {{baseUrl}}/api/registrations/{{analyticsRestartCreateRegistration.response.body.$.id}}
