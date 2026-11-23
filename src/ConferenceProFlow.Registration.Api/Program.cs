@@ -28,6 +28,11 @@ builder.Services.AddScoped<AllocationResultReconciliationService>();
 if (builder.Configuration.GetValue<bool>("OutboxPublisher:Enabled"))
     builder.Services.AddHostedService<OutboxPublisherService>();
 
+// Kafka analytics is an independently switchable hosted service. Leave disabled
+// until Registration Analytics Outbox migrations and Kafka infrastructure are ready.
+if (builder.Configuration.GetValue<bool>("KafkaAnalyticsPublisher:Enabled"))
+    builder.Services.AddHostedService<KafkaAnalyticsOutboxPublisherService>();
+
 // Disabled by default. Enable locally after applying the M2.6D1 Registration migration.
 if (builder.Configuration.GetValue<bool>("AllocationResultConsumer:Enabled"))
     builder.Services.AddHostedService<AllocationResultConsumerService>();

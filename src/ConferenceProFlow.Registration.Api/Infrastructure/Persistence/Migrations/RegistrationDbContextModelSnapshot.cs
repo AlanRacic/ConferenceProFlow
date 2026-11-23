@@ -119,7 +119,6 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<int>("Status")
-                        .HasMaxLength(20)
                         .HasColumnType("int");
 
                     b.Property<DateTimeOffset>("UpdatedAtUtc")
@@ -174,6 +173,57 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                         .IsUnique();
 
                     b.ToTable("AllocationResultInboxMessages", (string)null);
+                });
+
+            modelBuilder.Entity("ConferenceProFlow.Registration.Api.Infrastructure.Outbox.AnalyticsOutboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("MessageType")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("nvarchar(160)");
+
+                    b.Property<DateTimeOffset?>("NextAttemptAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset>("OccurredAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Payload")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("PublishAttempts")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("PublishedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("QuarantinedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("RegistrationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RegistrationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_AnalyticsOutboxMessages_RegistrationId");
+
+                    b.HasIndex("PublishedAtUtc", "QuarantinedAtUtc", "NextAttemptAtUtc", "OccurredAtUtc")
+                        .HasDatabaseName("IX_AnalyticsOutboxMessages_PublishStatus");
+
+                    b.ToTable("AnalyticsOutboxMessages", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_AnalyticsOutboxMessages_PublishAttempts", "[PublishAttempts] >= 0");
+                        });
                 });
 
             modelBuilder.Entity("ConferenceProFlow.Registration.Api.Infrastructure.Outbox.OutboxMessage", b =>
@@ -245,6 +295,15 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                 });
 
             modelBuilder.Entity("ConferenceProFlow.Registration.Api.Infrastructure.Inbox.AllocationResultInboxMessage", b =>
+                {
+                    b.HasOne("ConferenceProFlow.Registration.Api.Domain.Entities.Registration", null)
+                        .WithMany()
+                        .HasForeignKey("RegistrationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ConferenceProFlow.Registration.Api.Infrastructure.Outbox.AnalyticsOutboxMessage", b =>
                 {
                     b.HasOne("ConferenceProFlow.Registration.Api.Domain.Entities.Registration", null)
                         .WithMany()
