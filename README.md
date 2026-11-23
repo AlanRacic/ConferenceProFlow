@@ -8,7 +8,7 @@ ConferenceProFlow is an incremental, production-aware backend portfolio project 
 
 It is intentionally designed to run on a developer machine with Docker and .NET **without paid cloud services**. The platform is **not yet a production-ready public service**; implementation boundaries and remaining work are documented explicitly.
 
-## Implemented Architecture (through M3.3)
+## Implemented Architecture (through M3.4)
 
 ```text
 Registration API (.NET 10)
@@ -58,10 +58,21 @@ Registration API: Allocation Result reconciliation (Pending -> final)
                 v
        Apache Kafka (conferenceproflow.registration-finalized.v1)
 
-Analytics Worker / analytics database: planned in M3.4, not implemented yet.
+Analytics Worker (.NET 10 Generic Host; implemented M3.4)
+  |-- KafkaAnalyticsConsumerService (durable consumer group)
+  |-- KafkaAnalyticsRecordHandler (validate event and session key)
+  |-- AnalyticsEventProcessingService (SQL transaction + deduplication)
+  |-- AnalyticsQuarantineService (invalid/conflicting records)
+  +-- Analytics SQL database: ConferenceProFlowAnalytics
+       |-- ProcessedAnalyticsEvents (MessageId PK; RegistrationId unique)
+       |-- SessionRegistrationStats (confirmed/rejected by session)
+       +-- QuarantinedAnalyticsEvents (Topic, Partition, Offset PK)
+
+Analytics Kafka offsets are committed explicitly AFTER durable SQL handling;
+SQL and Kafka offset commits are not one distributed transaction.
 ```
 
-The two services **own separate databases** and communicate using versioned RabbitMQ integration events. No distributed SQL transaction spans both databases. Registrations are initially `Pending` and are later reconciled to `Confirmed` or `Rejected` (eventual consistency). Delivery is **at least once**, not exactly once; SQL constraints and idempotent handlers protect against repeated business processing. Publisher confirmation, consumer ACK and final business outcome mean different things.
+The Registration API and Allocation Worker **own separate operational databases** and communicate using versioned RabbitMQ integration events. Analytics Worker has a **third independently owned SQL database** and reads Kafka events; it does not query operational databases. No distributed SQL transaction spans these service-owned databases. Registrations are initially `Pending` and are later reconciled to `Confirmed` or `Rejected` (eventual consistency). Delivery is **at least once**, not exactly once; SQL constraints and idempotent handlers protect against repeated business processing. Publisher confirmation, consumer ACK and final business outcome mean different things.
 
 ### Currently implemented
 
@@ -76,11 +87,17 @@ The two services **own separate databases** and communicate using versioned Rabb
 - Automated xUnit v3 unit tests and SQL Server/RabbitMQ Testcontainers integration tests, including recovery and concurrency scenarios.
 - Local Docker Compose for SQL Server 2022, RabbitMQ, and optional Apache Kafka 4.4.0 (KRaft); reproducible Kafka topic initialization.
 - Registration-owned Analytics Transactional Outbox with `RegistrationFinalizedV1`, independently enabled Kafka publisher, Kafka acknowledgement-based publication state, retries/recovery, and SQL/Kafka Testcontainers integration tests.
+- Independent Analytics Worker (.NET 10 Generic Host) with `Confluent.Kafka` manual commits, `AnalyticsDbContext` and `InitialAnalyticsPersistence` EF Core migration.
+- Durable SQL idempotency ledger keyed by `MessageId` and unique `RegistrationId`; SQL-atomic per-session `ConfirmedCount` / `RejectedCount` projections with transaction-scoped `sp_getapplock` coordination.
+- SQL quarantine of malformed, invalid-key or conflicting events; offsets committed only after successful SQL processing, recognized duplicate or successful quarantine persistence.
+- Analytics xUnit/SQL Server/Kafka Testcontainers integration tests and a manual end-to-end demonstration of stop/restart catch-up and duplicate redelivery.
 - GitHub Actions build/test workflow.
 
 **M2.6 verified locally:** A session with capacity 2 received three registrations; two became `Confirmed`, one `Rejected`, and Registration/Allocation databases agreed on the results. A separate recovery exercise showed a registration remained `Pending` while the Allocation Worker was stopped and completed after the Worker restarted. This is a targeted manual demonstration, not exhaustive failure testing.
 
-**M3.3 locally verified:** Kafka publisher delivers actual finalization events (2 confirmed / 1 rejected in the capacity-2 demonstration), updates the dedicated SQL Analytics Outbox, and recovers from temporary Kafka unavailability. The Kafka publisher Testcontainers suite includes **four** scenarios, including a Kafka-ACK/SQL-update failure that deliberately produces an at-least-once redelivery with a stable logical event identity. Full-solution regression/CI remains part of final M3.3 validation.
+**M3.3 locally verified:** Kafka publisher delivers actual finalization events (2 confirmed / 1 rejected in the capacity-2 demonstration), updates the dedicated SQL Analytics Outbox, and recovers from temporary Kafka unavailability. The Kafka publisher Testcontainers suite includes **four** scenarios, including a Kafka-ACK/SQL-update failure that deliberately produces an at-least-once redelivery with a stable logical event identity. M3.3 was merged after regression/CI validation; its publication behavior continues to be exercised by the M3.4 end-to-end demonstration.
+
+**M3.4 locally verified:** A fresh capacity-2 session produces 2 Confirmed / 1 Rejected both in the authoritative operational workflow and in Analytics SQL; stopping Analytics Worker while a fourth registration is rejected leaves a temporary 2/1 projection, then restarting with the same consumer group catches up to 2/2. Re-publishing the original Kafka event (`MessageId` unchanged) is recognized as a duplicate without incrementing counts. Local Release build and full solution tests were reported successful during M3.4F; PR/CI results must still be checked on GitHub.
 
 ## Technology Stack
 
@@ -88,12 +105,12 @@ The two services **own separate databases** and communicate using versioned Rabb
 |---|---|
 | Backend | C#, .NET 10 LTS, ASP.NET Core Minimal API, .NET Generic Host |
 | Persistence | SQL Server 2022, EF Core 10, migrations and relational constraints |
-| Messaging | RabbitMQ / `RabbitMQ.Client` 7.x for operational work; Apache Kafka 4.4.0 and Confluent.Kafka for analytics event publishing |
-| Consistency | Local SQL transactions, idempotent processing, optimistic concurrency (`RowVersion`) |
+| Messaging | RabbitMQ / `RabbitMQ.Client` 7.x for operational work; Apache Kafka 4.4.0 and `Confluent.Kafka` for publishing and durable Analytics consumption |
+| Consistency | Local SQL transactions, idempotent processing, optimistic concurrency (`RowVersion`); Analytics transaction-scoped SQL locks and explicit post-SQL Kafka offset commits |
 | Testing | xUnit v3, Testcontainers for .NET, SQL Server / RabbitMQ / Kafka integration tests |
 | Development | Docker Compose, User Secrets, Visual Studio, GitHub Actions CI |
 
-Kafka infrastructure and **Registration-side Kafka publishing are implemented through M3.3**. Analytics consumption/projections, Kubernetes, distributed observability, and performance qualification are later work. MassTransit is **not used** by the implemented RabbitMQ pipeline.
+Kafka infrastructure and **Registration-side Kafka publishing** are implemented through M3.3; **Analytics consumption, SQL projections and quarantine** are implemented through M3.4. Controlled isolated replay (M3.5), Kubernetes, distributed observability and performance qualification remain later work. MassTransit is **not used** by the implemented RabbitMQ pipeline.
 
 ## Quick Start (Local)
 
@@ -113,11 +130,13 @@ Kafka infrastructure and **Registration-side Kafka publishing are implemented th
 
 The Registration API HTTPS development endpoint is `https://localhost:7217`. Its example requests are in [`docs/REGISTRATION_API.http`](docs/REGISTRATION_API.http). The OpenAPI JSON is exposed in Development at `/openapi/v1.json`; interactive Swagger UI is not configured.
 
-### Optional Kafka Publishing (M3.3)
+### Optional Kafka Publishing and Analytics (M3.3–M3.4)
 
 Follow [Kafka Local Development](docs/KAFKA_LOCAL_DEVELOPMENT.md) to start the optional Kafka Compose profile and initialize topics. Then follow the **[Kafka Publishing (M3.3) guide](docs/KAFKA_PUBLISHING.md)** to configure `KafkaAnalyticsPublisher:Enabled` and Kafka bootstrap/topic settings in Registration API User Secrets, run a finalization demonstration, inspect `AnalyticsOutboxMessages`, read broker events, and test Kafka-outage recovery.
 
-Kafka is not required for the existing M2 RabbitMQ registration/allocation workflow. The M3.3 publisher does not yet include an Analytics Worker or analytics SQL projections.
+To **consume** these finalized events and build SQL projections, configure the independent `ConferenceProFlow.Analytics.Worker` as documented in [Analytics Worker (M3.4)](docs/ANALYTICS_WORKER.md). Apply the existing `InitialAnalyticsPersistence` EF Core migration in a new development environment, keep its own `ConnectionStrings:AnalyticsDb` in User Secrets, then opt into durable consumption with `AnalyticsKafkaConsumer:Enabled=true`, `ObserveOnly=false` and `GroupId=conferenceproflow.analytics.v1`. The [Analytics E2E guide](docs/ANALYTICS_E2E_DEMO.md) demonstrates a fresh-session 2/1 projection, catch-up after restart to 2/2, and duplicate safety.
+
+Kafka remains **optional for the M2 RabbitMQ registration/allocation workflow**. When an Analytics Worker is disabled, Registration finalization is unaffected and Kafka events are retained only for the configured topic retention period.
 
 ### End-to-End Demo
 
@@ -170,20 +189,25 @@ The current GitHub Actions workflow runs restore, Release build, Docker availabi
 - [Kafka Analytics Architecture (M3.1)](docs/KAFKA_ANALYTICS_DESIGN.md)
 - [Kafka Local Development (M3.2)](docs/KAFKA_LOCAL_DEVELOPMENT.md)
 - [Kafka Publishing & Reliability Demo (M3.3)](docs/KAFKA_PUBLISHING.md)
+- [Analytics Worker Architecture and Operations (M3.4)](docs/ANALYTICS_WORKER.md)
+- [Analytics End-to-End and Restart/Duplicate Demo (M3.4F)](docs/ANALYTICS_E2E_DEMO.md)
+- [Analytics SQL Verification (M3.4E)](docs/ANALYTICS_SQL_VERIFICATION.md)
 
 ## Project Status and Next Steps
 
-**M1 — Core Registration API: complete. M2 — RabbitMQ Messaging & Allocation: complete. M3.1 — Kafka analytics architecture: complete. M3.2 — Kafka KRaft local infrastructure: complete. M3.3 — Registration analytics outbox and reliable Kafka publishing: implemented and locally verified (final regression/CI/PR closure tracked on GitHub).**
+**M1 — Core Registration API: complete. M2 — RabbitMQ Messaging & Allocation: complete. M3.1–M3.3 — Kafka design, local infrastructure, and reliable Registration event publishing: complete. M3.4 — Analytics Worker, independent SQL projections, quarantine, durable Kafka consumption and end-to-end validation: implemented and locally tested (PR/CI review pending).**
 
-Next major functionality: **M3.4 Analytics Worker**, independently consuming retained Kafka events and building idempotent SQL projections; M3.5 controlled replay/offset exercises. Automatic session inventory provisioning, production authentication and operational monitoring remain separate future work.
+Next major functionality: **M3.5 controlled consumer-group replay into an isolated Analytics SQL database**, followed by the M3.6 milestone-wide review and regression/CI gate. Automatic session inventory provisioning, production authentication and operational monitoring remain separate future work.
 
 ### Explicit Current Limitations
 
 - No automated provisioning of `SessionInventory` when a new Registration session is created; the local demo uses a guarded SQL script against AllocationDb. **This is for development only.**
 - Authentication and authorization are not implemented; some unpublished-session requests are accepted for development/testing.
 - RabbitMQ delivery is **at least once**, not exactly once; duplicate deliveries are handled by the current idempotency logic. Parking queues require trusted manual investigation; there is no audited replay interface or complete operational alerting.
-- Kafka publication is also **at least once**. Kafka producer idempotence does not prevent SQL/Kafka acknowledgement-gap redelivery. No Analytics Consumer or durable analytics deduplication exists until M3.4; earlier M3.2 smoke records may still be retained in the business topic.
+- Kafka publication is also **at least once**. Kafka producer idempotence does not prevent SQL/Kafka acknowledgement-gap redelivery. The M3.4 Analytics Consumer uses SQL deduplication and durable quarantine, but SQL and Kafka offset acknowledgement are not atomic. Earlier M3.2 smoke records may still be retained and can be quarantined.
 - Outbox publishers (including the M3.3 Kafka publisher) and the SQL Inbox processor are not designed to coordinate arbitrary numbers of active replicas via durable claims or leases. The Allocation processor's transient failure cooldown is in memory; Kafka publishing does not implement automatic poison-event quarantine.
+- The Analytics Worker is locally validated as a **single active instance**. Consumer rebalance/rolling-deployment behavior and multi-replica operational safety are not comprehensively qualified. Poison/quarantined data requires manual investigation; there is no automated remediation/replay dashboard.
+- M3.5 isolated projection rebuild from a separate replay group is **not implemented**. Kafka retention is bounded, so an expired event cannot be reconstructed from Kafka alone.
 - The current design does not provide global distributed transactions, guaranteed FIFO business decisions across services, or comprehensive automated full-system E2E and chaos tests.
 - Production secrets management, operational monitoring/alerting, capacity/performance qualification and stronger security boundaries remain future work.
 

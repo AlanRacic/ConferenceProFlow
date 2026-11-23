@@ -2,10 +2,10 @@
 
 **Milestone:** M3 — Kafka & Event Analytics  
 **Work item:** M3.1 — Kafka Analytics Architecture  
-**Status:** Reviewed architectural baseline; Kafka infrastructure (M3.2) and Registration-side finalization event/SQL Analytics Outbox/Kafka publisher (M3.3) implemented and locally verified. Analytics Worker/SQL projections/controlled replay remain future work.  
+**Status:** Reviewed architecture baseline; Kafka infrastructure (M3.2), Registration-side publishing (M3.3) and the Analytics Worker with SQL projections, quarantine and manual offsets (M3.4) implemented and locally verified. Isolated replay (M3.5) and milestone-wide hardening (M3.6) remain future work.  
 **Baseline:** M2.6 Registration ↔ Allocation messaging via RabbitMQ, independent SQL Server databases, Transactional Outbox / Inbox, final registration reconciliation.
 
-## Implementation status after M3.3
+## Implementation status after M3.4
 
 | Component | Status |
 |---|---|
@@ -15,10 +15,11 @@
 | SQL `AnalyticsOutboxMessages`, final-status atomic write | Implemented (M3.3B) |
 | `KafkaAnalyticsOutboxPublisherService`, acknowledged publication + retry | Implemented (M3.3C–D) |
 | SQL/Kafka Publisher Testcontainers scenarios (including ACK/SQL fault) | Implemented and locally tested (M3.3E) |
-| Analytics Consumer, Analytics SQL projections, application offset commits | Planned (M3.4) |
+| Analytics Consumer, independently owned Analytics SQL projections and per-record offset commits | Implemented and locally tested (M3.4) |
+| SQL idempotency ledger and durable quarantine for malformed/conflicting events | Implemented and locally tested (M3.4) |
 | Replay group / isolated projection rebuild | Planned (M3.5) |
 
-For current hands-on publishing configuration and local verification, see [Kafka Publishing](KAFKA_PUBLISHING.md). The architecture sections below preserve the original design rationale and intended full-M3 end state; **proposed Analytics Worker behavior is not yet implemented**.
+For Kafka publishing see [Kafka Publishing](KAFKA_PUBLISHING.md); for the implemented consumer, SQL schema and operational safety see [Analytics Worker](ANALYTICS_WORKER.md) and [Analytics E2E Demo](ANALYTICS_E2E_DEMO.md). The architecture sections below preserve the original design rationale, including **AD-05 isolated replay**, which remains planned for M3.5.
 
 ## 1. Purpose and business requirement
 
@@ -36,7 +37,7 @@ Allocation Worker → Allocation SQL Outbox → RabbitMQ → Registration API
 Registration API → Allocation Result Inbox + Registration final status (local atomic commit)
 ```
 
-**Proposed for M3:**
+**Implemented through M3.4 (with replay still planned):**
 
 ```text
 Allocation result received by Registration API
@@ -67,9 +68,9 @@ Allocation result received by Registration API
 
 Analytics can use an independent SQL Server database on the **existing local SQL Server container**. Separate database ownership does not require a new SQL Server container.
 
-## 4. Proposed integration contract
+## 4. Implemented integration contract
 
-**Event:** `RegistrationFinalizedV1` (new; proposed for M3)  
+**Event:** `RegistrationFinalizedV1` (implemented in M3.3)  
 **Kafka topic:** `conferenceproflow.registration-finalized.v1`  
 **Kafka message key:** `SessionId` serialized consistently as a canonical GUID string.  
 **Value:** JSON, camelCase; contract and schema version defined independently of entity classes.
@@ -112,7 +113,7 @@ The Kafka publisher sends each outbox payload using a stable `messageId` and the
 
 ## 6. Kafka topic, partitioning, retention and consumer group
 
-| Setting | Initial proposal | Reason |
+| Setting | Initial local configuration | Reason |
 |---|---|---|
 | Topic | `conferenceproflow.registration-finalized.v1` | Explicit purpose and contract version |
 | Partition key | `SessionId` | Related events for one session route to one partition; ordering exists only *within* a partition |
@@ -120,19 +121,23 @@ The Kafka publisher sends each outbox payload using a stable `messageId` and the
 | Replication factor | 1 locally | Single-broker developer topology; not a fault-tolerant production deployment |
 | Retention | 7 days initially, configurable | Bounded local replay/testing; events beyond retention cannot be reconstructed from Kafka alone |
 | Consumer group | `conferenceproflow.analytics.v1` | Analytics workers share work inside one group |
-| Consumer client | `Confluent.Kafka` for .NET (version to be selected in M3.4) | Standard .NET Kafka integration |
+| Consumer client | `Confluent.Kafka` 2.16.0 | Implemented .NET Kafka integration |
 | Cluster | Single-node Kafka in KRaft mode via Docker Compose | No ZooKeeper or paid cloud service in initial demo |
 
 **Architecture decision AD-03:** use `SessionId` as the key, three partitions locally, and seven-day retention. This gives per-session ordering *within one Kafka partition* but no total order across partitions. Very large sessions could create a hot partition; for the initial per-session analytics this is an acceptable, measurable assumption. The single-node KRaft broker is for learning and reproducibility, not broker fault tolerance.
+
+### Implementation note after M3.4
+
+The implemented durable consumer uses `EnableAutoCommit=false` and `EnableAutoOffsetStore=false`, reads from `conferenceproflow.registration-finalized.v1` with `GroupId=conferenceproflow.analytics.v1`, validates the canonical `SessionId` key and event fields, then commits **each Kafka record offset after durable SQL handling**. SQL business processing is atomic (dedup ledger plus session projection); malformed or conflicting records are durably quarantined. Temporary SQL and Kafka-commit failures restart the consumer without advancing the failed record's offset; duplicate redelivery is expected. Only a **single active Worker instance** has been validated. See [ANALYTICS_WORKER.md](ANALYTICS_WORKER.md) for exact configuration and limitations.
 
 ## 7. Analytics persistence and idempotency
 
 **Database:** `ConferenceProFlowAnalytics` (independent owner; same local SQL Server infrastructure is acceptable).
 
-**Proposed tables:**
+**Implemented tables (EF Core migration `InitialAnalyticsPersistence`):**
 
-1. `ProcessedAnalyticsEvents`: `MessageId` (PK), `RegistrationId` (unique), `SessionId`, `Status`, `ProcessedAtUtc`. Durable deduplication, per-registration business identity and traceability.
-2. `SessionRegistrationStats`: `SessionId` (PK), `ConfirmedCount`, `RejectedCount`, `UpdatedAtUtc` (optional row version or equivalent concurrency strategy).
+1. `ProcessedAnalyticsEvents`: `MessageId` (PK), `RegistrationId` (unique), `SessionId`, `Status`, `OccurredAtUtc`, `ProcessedAtUtc`. Durable deduplication, per-registration business identity and traceability.
+2. `SessionRegistrationStats`: `SessionId` (PK), `ConfirmedCount`, `RejectedCount`, `UpdatedAtUtc` (SQL-atomic `ExecuteUpdateAsync` increments and transaction-scoped `sp_getapplock` coordination).
 3. `QuarantinedAnalyticsEvents`: `(Topic, Partition, Offset)` unique, `MessageKey`, bounded raw `Payload`, `Reason`, `ReceivedAtUtc`. Durable record of malformed, unsupported or conflicting events that are deliberately not applied to projections. Apply safe payload size limits and avoid logging unbounded message content.
 
 For each valid new message, one Analytics SQL transaction must **insert the processed event and update the aggregate together**. Atomic counter increments and unique database constraints (not application-level read/modify/write alone) must protect against concurrent consumers. On duplicated `MessageId` or the same compatible final decision for `RegistrationId`, return success without incrementing counters. A conflicting finalization for the same `RegistrationId` is **not** a second count: persist it in `QuarantinedAnalyticsEvents` for investigation. Do not modify the original processed decision.
@@ -154,7 +159,7 @@ The initial aggregate counts **finalized registrations**; it does not claim to c
 
 ## 9. Testing and local demonstration acceptance
 
-The implemented M2.6 workflow stays functional when Kafka is disabled. A full M3 demonstration will use the same test conference pattern (two seats, three registrations), then verify:
+The implemented M2.6 workflow stays functional when Kafka is disabled. The M3.4 manual/automated demonstrations use the same test conference pattern (two seats, three registrations) and establish the following acceptance points:
 
 - Registration and Allocation produce **2 Confirmed / 1 Rejected** as before.
 - Analytics projection reaches **ConfirmedCount = 2, RejectedCount = 1** for that session.
@@ -166,7 +171,7 @@ The implemented M2.6 workflow stays functional when Kafka is disabled. A full M3
 - Normal M2.6 Registration ↔ Allocation processing continues when Kafka is stopped or Kafka publishing is disabled (pending Analytics Outbox rows are expected while unavailable).
 - Automated integration tests cover SQL transaction boundaries, Kafka event delivery, offset/deduplication behavior and restart cases (Docker/Testcontainers).
 
-Do not assume that these future M3 verifications have already passed; they are acceptance targets.
+M3.4 local checks have passed for normal 2/1 projections, catch-up after Worker restart to 2/2, and duplicate delivery without an extra count; integration tests cover malformed/conflicting events, SQL failures and offset behavior. **M3.5 isolated replay has not been carried out**, and CI/PR verification of the final M3.4 changes remains a separate gate.
 
 ## 10. Iterative delivery plan
 
@@ -179,7 +184,7 @@ Do not assume that these future M3 verifications have already passed; they are a
 | M3.5 | Consumer groups, controlled offset/replay demonstration, restart and fault tests |
 | M3.6 | End-to-end demo, documentation, regression testing and PR closure |
 
-**Architecture gate before M3.2:** the reviewed decisions AD-01 through AD-05 below define the implementation baseline. Avoid introducing new operational coupling, paid/cloud services, Kubernetes or a dashboard during this scope. M3.1 is documentation-only; passing M3.2–M3.6 acceptance criteria is not yet claimed.
+**Architecture decisions AD-01–AD-04** are implemented through M3.4 with local tests; **AD-05 isolated replay** is deferred to M3.5. These decisions remain the baseline for future work: avoid introducing cross-service SQL coupling, paid/cloud dependencies, Kubernetes or a dashboard just to close the current milestones.
 
 ## 11. Architecture review — decisions and boundaries
 
@@ -201,7 +206,7 @@ This review settles the initial implementation scope while leaving normal implem
 - Analytics failures do not roll back a completed Registration business decision. Starting the Registration API while Kafka is unavailable must remain possible when the Kafka publisher is disabled or operates with retrying background startup rather than a hard broker dependency.
 - The initial `RegistrationFinalizedV1` contract assumes a Registration finalizes once. Future cancellation or amendment events require an explicitly versioned change and different projection semantics.
 
-**Review checkpoints before the M3.1 PR:** validate no cross-database writes, no hidden SQL/Kafka dual-write, documented event-to-projection semantics, and a clear local demonstration path. These are design-level checks, not claims of passing Kafka integration tests.
+**Implemented review checkpoint (through M3.4):** the three services have independent database ownership; no SQL/Kafka dual-write occurs in a Registration business transaction; consumer offset commits are performed only after durable Analytics SQL processing/quarantine. The initial 2/1, stop/restart 2/2 and duplicate exercises passed locally, but production readiness, multi-instance resilience and M3.5 replay are not claimed.
 
 ## 12. References and scope boundaries
 
@@ -211,4 +216,4 @@ This review settles the initial implementation scope while leaving normal implem
 - Apache Kafka architecture and design documentation: https://kafka.apache.org/design/
 - Confluent Kafka .NET client documentation: https://docs.confluent.io/kafka-clients/dotnet/current/overview.html
 
-**Design status:** This document records the reviewed M3.1 **target architecture**. Kafka-specific components, schema, consumer, publisher, recovery tests, and replay procedure remain to be implemented in M3.2–M3.6. Architecture review does not mean production readiness.
+**Design/implementation status:** This document records the reviewed M3.1 **target architecture** and its implementation through **M3.4** (publisher, consumer, Analytics SQL, manual offsets, quarantine and local recovery tests). The controlled isolated projection replay of AD-05 remains for **M3.5**; milestone-wide closure and any broader hardening remain for **M3.6**. No claim of production readiness is made.

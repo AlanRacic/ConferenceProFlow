@@ -1083,7 +1083,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infrastructure\init-ka
 
 Use execution-policy overrides only for scripts you trust, and comply with organization-managed security policies.
 
-**Read the full [`KAFKA_LOCAL_DEVELOPMENT.md`](KAFKA_LOCAL_DEVELOPMENT.md) guide** for broker readiness, host versus Docker listeners, topic/retention verification, producer-consumer smoke checks, container-recreation persistence checks and troubleshooting. For the architecture of *future* Kafka business-event publishing, see [`KAFKA_ANALYTICS_DESIGN.md`](KAFKA_ANALYTICS_DESIGN.md).
+**Read the full [`KAFKA_LOCAL_DEVELOPMENT.md`](KAFKA_LOCAL_DEVELOPMENT.md) guide** for broker readiness, host versus Docker listeners, topic/retention verification, producer-consumer smoke checks, container-recreation persistence checks and troubleshooting. For the architecture of Kafka business-event publishing and consumption, see [`KAFKA_ANALYTICS_DESIGN.md`](KAFKA_ANALYTICS_DESIGN.md).
 
 Do not put generic smoke JSON into the operational topic `conferenceproflow.registration-finalized.v1`; use `conferenceproflow.kafka-smoke.v1`. The operational topic may already contain a test event from the initial M3.2 manual exercise. It must be consciously handled (validation/quarantine or an explicitly authorized development-only reset) before a new Analytics consumer processes historical records.
 
@@ -1140,4 +1140,112 @@ dotnet test tests/ConferenceProFlow.Registration.IntegrationTests/ConferenceProF
 
 There are **four** Publisher integration test cases: Confirmed, Rejected, unavailable Kafka/recovery, and Kafka ACK followed by injected publication-state SQL failure. The latter demonstrates intentional at-least-once behavior and stable event identity on retry. A separate M3.3B test suite covers the atomic status/Inbox/Analytics Outbox write.
 
-**Limitations:** single-active-instance Publisher, no complete automatic quarantine policy, Kafka duplicates possible after acknowledgement/SQL update gap, no M3.4 Analytics Consumer or analytics projections yet.
+**Limitations:** single-active-instance Publisher, no complete automatic publisher-side quarantine policy and Kafka duplicates possible after the acknowledgement/SQL update gap. M3.4 now provides an independent SQL-deduplicating Analytics Consumer; it cannot eliminate duplicate Kafka transport records.
+
+
+## M3.4 — Analytics Worker, SQL Projections and Durable Kafka Consumption
+
+**Detailed guide:** [ANALYTICS_WORKER.md](ANALYTICS_WORKER.md). **Manual E2E:** [ANALYTICS_E2E_DEMO.md](ANALYTICS_E2E_DEMO.md). The Analytics Worker is an independent `.NET 10` Generic Host at `src/ConferenceProFlow.Analytics.Worker`. Its database, `ConferenceProFlowAnalytics`, is **separate** from Registration and Allocation but runs on the **existing local SQL Server container**. Neither the Worker nor its `AnalyticsDbContext` queries the operational databases.
+
+### Database and User Secrets (new development machine)
+
+In Visual Studio use **Analytics Worker → Manage User Secrets**; preserve other existing configuration. The following is an **example to merge** into the existing JSON, never a replacement for credentials:
+
+```json
+{
+  "ConnectionStrings": {
+    "AnalyticsDb": "Server=127.0.0.1,14333;Database=ConferenceProFlowAnalytics;User Id=sa;Password=YOUR_LOCAL_SQL_PASSWORD;Encrypt=True;TrustServerCertificate=True;"
+  },
+  "AnalyticsKafkaConsumer": {
+    "Enabled": false,
+    "ObserveOnly": true,
+    "BootstrapServers": "127.0.0.1:9092",
+    "Topic": "conferenceproflow.registration-finalized.v1",
+    "GroupId": "conferenceproflow.analytics.preview.v1"
+  }
+}
+```
+
+Use the same local SQL login/password as the existing services, without committing secrets. The existing `InitialAnalyticsPersistence` EF Core migration creates **`ProcessedAnalyticsEvents`**, **`SessionRegistrationStats`** and **`QuarantinedAnalyticsEvents`**. With Docker SQL Server running, apply **existing** migrations (do not create a second initial migration):
+
+```powershell
+dotnet ef database update --project src/ConferenceProFlow.Analytics.Worker --startup-project src/ConferenceProFlow.Analytics.Worker --context AnalyticsDbContext
+```
+
+Inspect the database through **View → SQL Server Object Explorer**, connecting to `127.0.0.1,14333`. Run read-only checks from [ANALYTICS_SQL_VERIFICATION.md](ANALYTICS_SQL_VERIFICATION.md). Migration creation was a one-time M3.4B action; `database update` is only for a new database or pending migrations.
+
+### Choose one Analytics Worker mode
+
+| `Enabled` | `ObserveOnly` | `GroupId` | Action |
+| --- | --- | --- | --- |
+| `false` | any | any | Worker foundation only; does not consume Kafka. |
+| `true` | `true` | `conferenceproflow.analytics.preview.v1` | M3.4C **read-only** Kafka preview; no SQL writes, no offset commits. |
+| `true` | `false` | `conferenceproflow.analytics.v1` | M3.4E **durable** processing and per-record offset commits after durable handling. |
+
+For the durable mode, **change the existing `AnalyticsKafkaConsumer` section in Worker User Secrets**, preserving the database connection string:
+
+```json
+{
+  "AnalyticsKafkaConsumer": {
+    "Enabled": true,
+    "ObserveOnly": false,
+    "BootstrapServers": "127.0.0.1:9092",
+    "Topic": "conferenceproflow.registration-finalized.v1",
+    "GroupId": "conferenceproflow.analytics.v1"
+  }
+}
+```
+
+The last JSON is a **fragment**; do not replace all User Secrets. Durable mode requires a group ID different from the preview group. The default `appsettings.json` keeps the consumer disabled. Use **the same durable group ID** across restarts to continue from previously committed offsets. `AutoOffsetReset=Earliest` applies to a group **without existing committed offsets** and can therefore process historical retained events, including malformed development smoke records that must be quarantined rather than counted.
+
+### Start Analytics with the existing infrastructure
+
+From the repository root, ensure Docker, SQL Server, RabbitMQ and Kafka are up:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml --profile kafka up -d
+```
+
+In three separate **Visual Studio Terminals**, start Registration API, Allocation Worker and Analytics Worker, respectively (keep the appropriate Registration/Allocation messaging and Kafka Publisher flags enabled as described in M2.6/M3.3):
+
+```powershell
+dotnet run --project src/ConferenceProFlow.Registration.Api/ConferenceProFlow.Registration.Api.csproj --launch-profile https
+```
+
+```powershell
+dotnet run --project src/ConferenceProFlow.Allocation.Worker/ConferenceProFlow.Allocation.Worker.csproj --launch-profile ConferenceProFlow.Allocation.Worker
+```
+
+```powershell
+dotnet run --project src/ConferenceProFlow.Analytics.Worker/ConferenceProFlow.Analytics.Worker.csproj
+```
+
+When `ObserveOnly=false`, the Worker reads one Kafka record at a time; a scoped SQL handler validates it, applies a new event or recognizes a duplicate, or durably quarantines malformed/conflicting content. **Only after a durable result** does the caller explicitly `Commit(record)`; SQL errors leave the offset uncommitted and trigger restart/backoff. SQL commit and Kafka offset commit are **not** one atomic transaction: duplicate Kafka delivery remains possible, but its side effect is deduplicated in Analytics SQL. The service has been tested in a **single active Worker** configuration, not qualified for highly available multi-replica deployment.
+
+### M3.4 Verification and tests
+
+The guide [ANALYTICS_E2E_DEMO.md](ANALYTICS_E2E_DEMO.md) exercises a fresh session (capacity 2) that yields **2 confirmed / 1 rejected** in Analytics SQL; stop the Worker, submit a fourth registration, then restart the same group to catch up to **2 / 2**; optionally replay the identical event with the included local PowerShell helper and verify counts remain unchanged. `docs/ANALYTICS_E2E_CHECKS.sql` contains read-only cross-database **manual** verification queries. The application itself must **never query other services' SQL databases**.
+
+From the repository root with Docker Desktop running, run the Analytics project and the complete solution tests:
+
+```powershell
+dotnet build ConferenceProFlow.slnx --configuration Release
+```
+
+```powershell
+dotnet test tests/ConferenceProFlow.Analytics.IntegrationTests/ConferenceProFlow.Analytics.IntegrationTests.csproj --configuration Release --no-build --verbosity normal
+```
+
+```powershell
+dotnet test ConferenceProFlow.slnx --configuration Release --no-build --verbosity normal
+```
+
+M3.4B–E added **30 Analytics test cases** (six persistence, two preview, eleven SQL processing, eleven durable consumer/handler), as locally verified during development. Final PR/CI results are tracked separately on GitHub.
+
+To inspect the durable Kafka group's positions:
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml --profile kafka exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:19092 --describe --group conferenceproflow.analytics.v1
+```
+
+Stopping the Analytics Worker (`Ctrl+C`) does **not** invalidate Registration final statuses; it delays only the Analytics projection. Kafka retains events for the configured topic retention (seven days in the initial local topology); this is not an unlimited event archive. **Do not reset the durable group's offsets, delete SQL projections, or run `docker compose down -v`** to make a test pass. Controlled replay into an isolated database is deferred to M3.5.
