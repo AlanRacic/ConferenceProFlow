@@ -1,6 +1,5 @@
 <Solution>
   <Folder Name="/Solution Items/">
-    <File Path="../../Users/nikra/Desktop/docs/ALLOCATION_RESULT_EVENTS.md" />
     <File Path="docs/ANALYTICS_WORKER.md" />
     <File Path="docs/ARCHITECTURE.md" />
     <File Path="docs/KAFKA_ANALYTICS_DESIGN.md" />
