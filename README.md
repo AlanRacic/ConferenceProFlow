@@ -8,7 +8,7 @@ ConferenceProFlow is an incremental, production-aware backend portfolio project 
 
 It is intentionally designed to run on a developer machine with Docker and .NET **without paid cloud services**. The platform is **not yet a production-ready public service**; implementation boundaries and remaining work are documented explicitly.
 
-## Implemented Architecture (through M3.4)
+## Implemented Architecture (through M3.5)
 
 ```text
 Registration API (.NET 10)
@@ -72,6 +72,17 @@ Analytics Kafka offsets are committed explicitly AFTER durable SQL handling;
 SQL and Kafka offset commits are not one distributed transaction.
 ```
 
+**Additional M3.5 replay path (separate mode of the Analytics Worker):**
+```text
+Apache Kafka: conferenceproflow.registration-finalized.v1
+  |-- Live group: conferenceproflow.analytics.v1 -> ConferenceProFlowAnalytics
+  +-- Isolated replay group: conferenceproflow.analytics.replay.<run-id>
+        -> KafkaAnalyticsReplayRunner (bounded partition snapshot)
+        -> existing durable record handler / SQL idempotency / quarantine
+        -> ConferenceProFlowAnalyticsReplay (separate SQL database)
+```
+Replay does not reset live offsets or write to the live Analytics database. A fresh run requires an **empty migrated replay database** and an **unused replay group**. Replays reconstruct only events still retained by Kafka.
+
 The Registration API and Allocation Worker **own separate operational databases** and communicate using versioned RabbitMQ integration events. Analytics Worker has a **third independently owned SQL database** and reads Kafka events; it does not query operational databases. No distributed SQL transaction spans these service-owned databases. Registrations are initially `Pending` and are later reconciled to `Confirmed` or `Rejected` (eventual consistency). Delivery is **at least once**, not exactly once; SQL constraints and idempotent handlers protect against repeated business processing. Publisher confirmation, consumer ACK and final business outcome mean different things.
 
 ### Currently implemented
@@ -91,13 +102,18 @@ The Registration API and Allocation Worker **own separate operational databases*
 - Durable SQL idempotency ledger keyed by `MessageId` and unique `RegistrationId`; SQL-atomic per-session `ConfirmedCount` / `RejectedCount` projections with transaction-scoped `sp_getapplock` coordination.
 - SQL quarantine of malformed, invalid-key or conflicting events; offsets committed only after successful SQL processing, recognized duplicate or successful quarantine persistence.
 - Analytics xUnit/SQL Server/Kafka Testcontainers integration tests and a manual end-to-end demonstration of stop/restart catch-up and duplicate redelivery.
+- Guarded, one-shot, **bounded Kafka replay (M3.5)** using a dedicated consumer group, per-partition low/high watermarks, local snapshot manifest, explicit offset commits after durable replay SQL handling, and explicit resume.
+- A fourth *logical* SQL database, `ConferenceProFlowAnalyticsReplay`, on the **same** local SQL Server container, populated using the existing `AnalyticsDbContext`/migration; the live Analytics database remains independent.
+- SQL/Kafka Testcontainers replay integration tests for empty/multiple partitions, duplicates, quarantine, late records, SQL failure/resume, completed-run guard and loss of retained records.
 - GitHub Actions build/test workflow.
 
 **M2.6 verified locally:** A session with capacity 2 received three registrations; two became `Confirmed`, one `Rejected`, and Registration/Allocation databases agreed on the results. A separate recovery exercise showed a registration remained `Pending` while the Allocation Worker was stopped and completed after the Worker restarted. This is a targeted manual demonstration, not exhaustive failure testing.
 
 **M3.3 locally verified:** Kafka publisher delivers actual finalization events (2 confirmed / 1 rejected in the capacity-2 demonstration), updates the dedicated SQL Analytics Outbox, and recovers from temporary Kafka unavailability. The Kafka publisher Testcontainers suite includes **four** scenarios, including a Kafka-ACK/SQL-update failure that deliberately produces an at-least-once redelivery with a stable logical event identity. M3.3 was merged after regression/CI validation; its publication behavior continues to be exercised by the M3.4 end-to-end demonstration.
 
-**M3.4 locally verified:** A fresh capacity-2 session produces 2 Confirmed / 1 Rejected both in the authoritative operational workflow and in Analytics SQL; stopping Analytics Worker while a fourth registration is rejected leaves a temporary 2/1 projection, then restarting with the same consumer group catches up to 2/2. Re-publishing the original Kafka event (`MessageId` unchanged) is recognized as a duplicate without incrementing counts. Local Release build and full solution tests were reported successful during M3.4F; PR/CI results must still be checked on GitHub.
+**M3.4 locally verified:** A fresh capacity-2 session produces 2 Confirmed / 1 Rejected both in the authoritative operational workflow and in Analytics SQL; stopping Analytics Worker while a fourth registration is rejected leaves a temporary 2/1 projection, then restarting with the same consumer group catches up to 2/2. Re-publishing the original Kafka event (`MessageId` unchanged) is recognized as a duplicate without incrementing counts. Local Release build, regression tests, and the M3.4 Pull Request CI were reported successful.
+
+**M3.5 locally validated (feature PR/CI pending):** A fresh capacity-2 session reached 2 Confirmed / 1 Rejected in both live and replay Analytics SQL; the three finalized events matched by identity, and live consumer-group offsets stayed unchanged across the bounded replay. Six new Kafka + SQL Server Testcontainers replay test cases also passed locally, including injected SQL failure and explicit resume, and retention-gap refusal. Full Analytics regression, the complete solution Release build and the full solution regression suite passed locally on 24 November 2026; Pull Request review and GitHub Actions CI are still pending.
 
 ## Technology Stack
 
@@ -110,7 +126,7 @@ The Registration API and Allocation Worker **own separate operational databases*
 | Testing | xUnit v3, Testcontainers for .NET, SQL Server / RabbitMQ / Kafka integration tests |
 | Development | Docker Compose, User Secrets, Visual Studio, GitHub Actions CI |
 
-Kafka infrastructure and **Registration-side Kafka publishing** are implemented through M3.3; **Analytics consumption, SQL projections and quarantine** are implemented through M3.4. Controlled isolated replay (M3.5), Kubernetes, distributed observability and performance qualification remain later work. MassTransit is **not used** by the implemented RabbitMQ pipeline.
+Kafka infrastructure and **Registration-side Kafka publishing** are implemented through M3.3; **Analytics consumption, SQL projections and quarantine** are implemented through M3.4. Controlled isolated replay (M3.5) is implemented and locally verified; Kubernetes, distributed observability and performance qualification remain later work. MassTransit is **not used** by the implemented RabbitMQ pipeline.
 
 ## Quick Start (Local)
 
@@ -130,11 +146,13 @@ Kafka infrastructure and **Registration-side Kafka publishing** are implemented 
 
 The Registration API HTTPS development endpoint is `https://localhost:7217`. Its example requests are in [`docs/REGISTRATION_API.http`](docs/REGISTRATION_API.http). The OpenAPI JSON is exposed in Development at `/openapi/v1.json`; interactive Swagger UI is not configured.
 
-### Optional Kafka Publishing and Analytics (M3.3–M3.4)
+### Optional Kafka Publishing, Analytics and Replay (M3.3–M3.5)
 
 Follow [Kafka Local Development](docs/KAFKA_LOCAL_DEVELOPMENT.md) to start the optional Kafka Compose profile and initialize topics. Then follow the **[Kafka Publishing (M3.3) guide](docs/KAFKA_PUBLISHING.md)** to configure `KafkaAnalyticsPublisher:Enabled` and Kafka bootstrap/topic settings in Registration API User Secrets, run a finalization demonstration, inspect `AnalyticsOutboxMessages`, read broker events, and test Kafka-outage recovery.
 
 To **consume** these finalized events and build SQL projections, configure the independent `ConferenceProFlow.Analytics.Worker` as documented in [Analytics Worker (M3.4)](docs/ANALYTICS_WORKER.md). Apply the existing `InitialAnalyticsPersistence` EF Core migration in a new development environment, keep its own `ConnectionStrings:AnalyticsDb` in User Secrets, then opt into durable consumption with `AnalyticsKafkaConsumer:Enabled=true`, `ObserveOnly=false` and `GroupId=conferenceproflow.analytics.v1`. The [Analytics E2E guide](docs/ANALYTICS_E2E_DEMO.md) demonstrates a fresh-session 2/1 projection, catch-up after restart to 2/2, and duplicate safety.
+
+For a **separate, bounded projection rebuild**, see [Kafka Replay Design](docs/KAFKA_REPLAY_DESIGN.md), [Replay Setup](docs/KAFKA_REPLAY_SETUP.md), [Replay Runner](docs/KAFKA_REPLAY_RUNNER.md), and [Replay E2E Demonstration](docs/KAFKA_REPLAY_E2E_DEMO.md). Use a distinct `AnalyticsReplay:GroupId` prefixed `conferenceproflow.analytics.replay.`, `ConnectionStrings:AnalyticsReplayDb` targeting `ConferenceProFlowAnalyticsReplay`, and `AnalyticsKafkaConsumer:Enabled=false` while `AnalyticsReplay:Enabled=true`. Never run replay against the live Analytics database or reset the live group's offsets.
 
 Kafka remains **optional for the M2 RabbitMQ registration/allocation workflow**. When an Analytics Worker is disabled, Registration finalization is unaffected and Kafka events are retained only for the configured topic retention period.
 
@@ -192,12 +210,17 @@ The current GitHub Actions workflow runs restore, Release build, Docker availabi
 - [Analytics Worker Architecture and Operations (M3.4)](docs/ANALYTICS_WORKER.md)
 - [Analytics End-to-End and Restart/Duplicate Demo (M3.4F)](docs/ANALYTICS_E2E_DEMO.md)
 - [Analytics SQL Verification (M3.4E)](docs/ANALYTICS_SQL_VERIFICATION.md)
+- [Kafka Replay Design (M3.5)](docs/KAFKA_REPLAY_DESIGN.md)
+- [Replay Setup and Safety (M3.5B)](docs/KAFKA_REPLAY_SETUP.md)
+- [Bounded Kafka Replay Runner (M3.5C)](docs/KAFKA_REPLAY_RUNNER.md)
+- [Replay E2E Demo and Cross-DB Comparison (M3.5D)](docs/KAFKA_REPLAY_E2E_DEMO.md)
+- [Replay Automated Integration Tests (M3.5E)](docs/KAFKA_REPLAY_INTEGRATION_TESTS.md)
 
 ## Project Status and Next Steps
 
-**M1 — Core Registration API: complete. M2 — RabbitMQ Messaging & Allocation: complete. M3.1–M3.3 — Kafka design, local infrastructure, and reliable Registration event publishing: complete. M3.4 — Analytics Worker, independent SQL projections, quarantine, durable Kafka consumption and end-to-end validation: implemented and locally tested (PR/CI review pending).**
+**M1 — Core Registration API: complete. M2 — RabbitMQ Messaging & Allocation: complete. M3.1–M3.4 — Kafka design, infrastructure, publication and durable Analytics Worker: complete and merged. M3.5 — isolated bounded Kafka replay: implemented, locally demonstrated and verified with full-solution regression tests; PR review and GitHub Actions CI pending.**
 
-Next major functionality: **M3.5 controlled consumer-group replay into an isolated Analytics SQL database**, followed by the M3.6 milestone-wide review and regression/CI gate. Automatic session inventory provisioning, production authentication and operational monitoring remain separate future work.
+Next: **open the M3.5 Pull Request and verify GitHub Actions CI**, followed by the M3.6 milestone-wide review/hardening. Automatic session inventory provisioning, production authentication and operational monitoring remain separate future work.
 
 ### Explicit Current Limitations
 
@@ -207,7 +230,7 @@ Next major functionality: **M3.5 controlled consumer-group replay into an isolat
 - Kafka publication is also **at least once**. Kafka producer idempotence does not prevent SQL/Kafka acknowledgement-gap redelivery. The M3.4 Analytics Consumer uses SQL deduplication and durable quarantine, but SQL and Kafka offset acknowledgement are not atomic. Earlier M3.2 smoke records may still be retained and can be quarantined.
 - Outbox publishers (including the M3.3 Kafka publisher) and the SQL Inbox processor are not designed to coordinate arbitrary numbers of active replicas via durable claims or leases. The Allocation processor's transient failure cooldown is in memory; Kafka publishing does not implement automatic poison-event quarantine.
 - The Analytics Worker is locally validated as a **single active instance**. Consumer rebalance/rolling-deployment behavior and multi-replica operational safety are not comprehensively qualified. Poison/quarantined data requires manual investigation; there is no automated remediation/replay dashboard.
-- M3.5 isolated projection rebuild from a separate replay group is **not implemented**. Kafka retention is bounded, so an expired event cannot be reconstructed from Kafka alone.
+- M3.5 replay rebuilds an **isolated projection only from Kafka records retained at snapshot time**. It cannot reconstruct already-expired records or certify a complete historical rebuild of the live database. The snapshot is a local file and replay has one-process/local-lock semantics, not multi-node coordination.
 - The current design does not provide global distributed transactions, guaranteed FIFO business decisions across services, or comprehensive automated full-system E2E and chaos tests.
 - Production secrets management, operational monitoring/alerting, capacity/performance qualification and stronger security boundaries remain future work.
 

@@ -1,6 +1,6 @@
-# ConferenceProFlow — Analytics Worker (M3.4)
+# ConferenceProFlow — Analytics Worker and Isolated Replay (M3.4–M3.5)
 
-**Status:** Implemented and locally verified in M3.4A–F; feature PR/CI review is a separate gate.  
+**Status:** M3.4 durable analytics implemented and merged; M3.5 isolated bounded replay implemented, locally demonstrated and six replay integration cases passed. Full M3.5 local Release build and regression passed; PR/CI pending.  
 **Runtime:** .NET 10 Generic Host (no HTTP API or dashboard).  
 **Ownership:** `ConferenceProFlowAnalytics` is owned by the Analytics Worker and is independent of Registration and Allocation databases.  
 **Scope:** One active Analytics Worker and one durable Kafka consumer group; **not a validated multi-replica production deployment**.
@@ -206,9 +206,19 @@ The manual runbook [ANALYTICS_E2E_DEMO.md](ANALYTICS_E2E_DEMO.md) tests three di
 | B: Restart same durable group | 2 Confirmed / 2 Rejected | Catches up to 2/2; 4 processed events |
 | C: Republish exact first event | Unchanged | Remains 2/2; `DuplicateMessage`, no new ledger row |
 
-The script `scripts/demo/Replay-AnalyticsFinalization.ps1` resends **one** original Kafka payload for demonstration. This is **not** the separate-group, isolated-database replay planned for **M3.5**. It does not reset SQL or Kafka offsets. Check a script before running it; use a process-scoped PowerShell execution-policy override only when permitted by your environment and trusted.
+The script `scripts/demo/Replay-AnalyticsFinalization.ps1` resends **one** original Kafka payload for demonstration. This is **not** the separate-group, isolated-database replay implemented in **M3.5**. It does not reset SQL or Kafka offsets. Check a script before running it; use a process-scoped PowerShell execution-policy override only when permitted by your environment and trusted.
 
-## 7. Operational limitations and next milestone
+## 7. M3.5 — Isolated, bounded Kafka replay
+
+The **same .NET 10 Analytics Worker** now supports mutually exclusive live and one-shot replay modes. In replay mode, `AnalyticsReplay:Enabled=true` and `AnalyticsKafkaConsumer:Enabled=false`. A guard requires an isolated SQL connection to **`ConferenceProFlowAnalyticsReplay`** on the same SQL Server, a replay-only Kafka consumer group (`conferenceproflow.analytics.replay.<run-id>`), and the supported `conferenceproflow.registration-finalized.v1` topic. It reuses the existing `AnalyticsDbContext`, initial migration, record handler, SQL idempotency ledger, projections and quarantine — not a second business-logic implementation.
+
+The replay runner first captures **each Kafka partition's earliest retained offset and exclusive high watermark**. It writes a local JSON manifest at `%TEMP%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json` and reads exactly those captured ranges. Every successfully applied/recognized duplicate/durably quarantined record is followed by a **manual commit for the replay group**; replay ends only when all captured windows are complete. An interrupted run can explicitly resume with the same snapshot, replay group and SQL state; a completed run cannot be resumed. Missing records caused by retention stop replay instead of silently skipping a gap.
+
+Manual M3.5D verification of a **fresh** session (capacity two) showed matching **2 confirmed / 1 rejected** SQL projections and **three identical finalized-event identities** in live and replay databases, while the live Kafka group offsets stayed unchanged across the isolated replay. Six SQL Server/Kafka Testcontainers replay cases passed locally in M3.5E after a clean rebuild. The M3.5 full-solution Release build and regression passed locally on 24 November 2026; PR and GitHub Actions CI remain pending.
+
+Read [Replay Design](KAFKA_REPLAY_DESIGN.md), [Replay Setup](KAFKA_REPLAY_SETUP.md), [Replay Runner](KAFKA_REPLAY_RUNNER.md), [Replay E2E](KAFKA_REPLAY_E2E_DEMO.md), and [Replay Integration Tests](KAFKA_REPLAY_INTEGRATION_TESTS.md). Replay reconstructs **retained events only**; it is not an unlimited historical archive or a replacement for existing live statistics.
+
+## 8. Operational limitations and next milestone
 
 - **At-least-once:** SQL commit and Kafka offset commit can fail independently. Duplicates may occur in Kafka; SQL projections are idempotent for supported events.
 - **Single active instance:** Parallel Kafka consumer group members/long rebalances/rolling deployments and scaling behavior have not been comprehensively validated.
@@ -216,6 +226,6 @@ The script `scripts/demo/Replay-AnalyticsFinalization.ps1` resends **one** origi
 - **Quarantine is not remediation:** malformed or conflicting events are stored for manual analysis, not automatically corrected or routed to a production dead-letter process.
 - **Local only:** Docker-based Kafka is a single-node development cluster; no production secrets management, HA, alerting, SLOs or disaster-recovery guarantee is provided.
 - **Focused metrics:** only finalized confirmed/rejected counts by session; no dashboard, time-series aggregates, cancellation/amendment handling or privacy-governed operational API.
-- **M3.5 follows:** use a **separate replay group and isolated Analytics SQL database** to verify retained-event projection rebuild **without altering the live projection**. M3.6 covers milestone-wide verification/documentation gates.
+- **M3.5 implemented locally:** replay uses a new group, isolated SQL and bounded snapshot; the runner is single-process/local-file coordinated, not a multi-node production replay platform. M3.6 covers milestone-wide verification/documentation gates.
 
 **Do not reset live Kafka offsets, delete live projection tables or run `docker compose down -v` to satisfy a demo.** A green integration test suite does not imply full production readiness.

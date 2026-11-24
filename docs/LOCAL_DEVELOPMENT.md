@@ -1,6 +1,6 @@
 # ConferenceProFlow — Local Development
 
-> Updated through **M3.3**: the M2.6 bidirectional RabbitMQ workflow remains intact; M3.2 adds local Apache Kafka infrastructure and M3.3 adds a Registration-side `RegistrationFinalizedV1` Analytics SQL Outbox and Kafka background publisher. **No Analytics Worker or analytics database is implemented yet.** This does not claim production readiness.
+> Updated through **M3.5**: M2.6 implements bidirectional RabbitMQ, M3.2–M3.3 add Kafka and reliable finalization publishing, M3.4 adds a durable SQL-backed Analytics Worker, and M3.5 adds **guarded, isolated bounded Kafka replay**. Replay/analytics remain local development capabilities, not a claim of production readiness.
 
 ## Prerequisites
 
@@ -1248,4 +1248,100 @@ To inspect the durable Kafka group's positions:
 docker compose --env-file .env -f infrastructure/compose.yaml --profile kafka exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:19092 --describe --group conferenceproflow.analytics.v1
 ```
 
-Stopping the Analytics Worker (`Ctrl+C`) does **not** invalidate Registration final statuses; it delays only the Analytics projection. Kafka retains events for the configured topic retention (seven days in the initial local topology); this is not an unlimited event archive. **Do not reset the durable group's offsets, delete SQL projections, or run `docker compose down -v`** to make a test pass. Controlled replay into an isolated database is deferred to M3.5.
+Stopping the Analytics Worker (`Ctrl+C`) does **not** invalidate Registration final statuses; it delays only the Analytics projection. Kafka retains events for the configured topic retention (seven days in the initial local topology); this is not an unlimited event archive. **Do not reset the durable group's offsets, delete SQL projections, or run `docker compose down -v`** to make a test pass. Controlled replay into an isolated database is implemented and locally tested in M3.5.
+
+
+## M3.5 — Guarded Kafka Replay and Isolated Analytics Projection
+
+**Read first:** [Kafka Replay Design](KAFKA_REPLAY_DESIGN.md), [Replay Setup](KAFKA_REPLAY_SETUP.md), [Bounded Replay Runner](KAFKA_REPLAY_RUNNER.md), [Manual E2E](KAFKA_REPLAY_E2E_DEMO.md), and [Replay Integration Tests](KAFKA_REPLAY_INTEGRATION_TESTS.md). This section is an entry point, not a replacement for the full runbooks. The six Kafka + SQL Server Replay Runner integration test cases were reported **passing locally** in M3.5E; full-solution Release regression and PR/CI validation are separate gates.
+
+### Environment and ownership
+
+Use the existing Docker Compose SQL Server (no extra SQL container). The Analytics Worker has **two mutually exclusive execution modes**, selected through User Secrets:
+
+| Mode | Configuration | SQL database | Kafka group |
+| --- | --- | --- | --- |
+| Live durable consumer | `AnalyticsReplay:Enabled=false`; `AnalyticsKafkaConsumer:Enabled=true`, `ObserveOnly=false` | `ConferenceProFlowAnalytics` | `conferenceproflow.analytics.v1` |
+| One-shot replay | `AnalyticsReplay:Enabled=true`; `AnalyticsKafkaConsumer:Enabled=false` | `ConferenceProFlowAnalyticsReplay` | `conferenceproflow.analytics.replay.<new-run-id>` |
+
+Replay's safety guard validates expected database names, the **same SQL Server Data Source**, non-live Kafka group prefix and supported topic. Fresh replay requires an **empty, migrated replay SQL database** and previously unused group; otherwise it refuses to start. **Do not change connection strings to bypass a guard.** The M3.5D local run already populated the existing replay database, so it is **not** a suitable fresh-run target.
+
+The following illustrates only the relevant User Secrets sections; **merge these keys with existing secrets, never replace the entire file or commit it**:
+
+```json
+{
+  "ConnectionStrings": {
+    "AnalyticsDb": "Server=127.0.0.1,14333;Database=ConferenceProFlowAnalytics;User Id=sa;Password=<LOCAL_PASSWORD>;Encrypt=True;TrustServerCertificate=True;",
+    "AnalyticsReplayDb": "Server=127.0.0.1,14333;Database=ConferenceProFlowAnalyticsReplay;User Id=sa;Password=<LOCAL_PASSWORD>;Encrypt=True;TrustServerCertificate=True;"
+  },
+  "AnalyticsKafkaConsumer": { "Enabled": false },
+  "AnalyticsReplay": {
+    "Enabled": true,
+    "Resume": false,
+    "MaxIdleSeconds": 60,
+    "BootstrapServers": "127.0.0.1:9092",
+    "Topic": "conferenceproflow.registration-finalized.v1",
+    "GroupId": "conferenceproflow.analytics.replay.<new-run-id>"
+  }
+}
+```
+
+For a **new, empty replay database** only, with SQL Server running and the replay setup flags correctly configured, apply the **existing** migration with the explicit design-time argument; do not create a second migration:
+
+```powershell
+dotnet ef database update --project src/ConferenceProFlow.Analytics.Worker --startup-project src/ConferenceProFlow.Analytics.Worker --context AnalyticsDbContext -- --replay
+```
+
+The existing `ConferenceProFlowAnalyticsReplay` database from the completed M3.5D demonstration already has this migration. **Do not repeat database initialization or delete/recreate databases just to rerun the demo.** For another fresh replay, deliberately plan a separate safe demo run; the current implementation requires an empty target with the configured replay database name and an unused replay group.
+
+### Controlled Replay: execute and verify
+
+1. Generate a **new session** with capacity two through the existing M2.6 demo, and confirm three finalizations are published within Kafka retention: **2 confirmed, 1 rejected**.
+2. Wait for live Analytics to catch up. Save read-only per-partition live group offsets, then stop the three .NET applications but **keep the Docker infrastructure running**.
+3. Configure exclusive replay mode with an unused `GroupId` and an empty, migrated replay database (never the live DB).
+4. Run the **one-shot** worker:
+
+```powershell
+dotnet run --project src/ConferenceProFlow.Analytics.Worker/ConferenceProFlow.Analytics.Worker.csproj
+```
+
+5. Expect `REPLAY COMPLETED` only when every partition reaches its captured **exclusive high watermark**. Compare the new session across databases with the read-only [`KAFKA_REPLAY_COMPARISON.sql`](KAFKA_REPLAY_COMPARISON.sql): confirm counts **2/1** and **three matching finalization event identities**. Do not require full historical database equivalence; Kafka retention is **seven days** in the initial local topic.
+6. Inspect the separate replay group's offsets (never reset the live group's offsets):
+
+```powershell
+docker compose --env-file .env -f infrastructure/compose.yaml --profile kafka exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:19092 --describe --group conferenceproflow.analytics.replay.demo01
+```
+
+Replace `demo01` with the **actual group suffix used in the run**. Confirm that the live group's committed offsets did not change because of replay while live applications were stopped. Afterwards set `AnalyticsReplay:Enabled=false` and leave both local SQL databases intact.
+
+### Interrupted replay and bounded snapshot
+
+Snapshots are stored **outside Git** at `%TEMP%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json`, with the original partition `[low, highExclusive)` ranges. For an interrupted run, fix the underlying error, keep the **same** SQL state, group, topic, snapshot and database, then set `AnalyticsReplay:Resume=true`. The replay group Kafka-committed positions are authoritative during resume. Do **not** resume a manifest marked complete; do **not** use a fresh run with the same group; do **not** delete manifests to bypass safeguards. If retention removed a required record, the runner refuses to claim completion.
+
+### Automated tests and final validation
+
+From the repository root with Docker Desktop running, the targeted six-case suite:
+
+```powershell
+dotnet test tests/ConferenceProFlow.Analytics.IntegrationTests/ConferenceProFlow.Analytics.IntegrationTests.csproj --configuration Release --filter "FullyQualifiedName~KafkaReplayRunnerIntegrationTests" --verbosity normal
+```
+
+All Analytics tests:
+
+```powershell
+dotnet test tests/ConferenceProFlow.Analytics.IntegrationTests/ConferenceProFlow.Analytics.IntegrationTests.csproj --configuration Release --verbosity normal
+```
+
+Full-solution Release build then regression:
+
+```powershell
+dotnet build ConferenceProFlow.slnx --configuration Release
+```
+
+```powershell
+dotnet test ConferenceProFlow.slnx --configuration Release --no-build --verbosity normal
+```
+
+The targeted **six Replay Runner integration cases passed locally after a clean rebuild**. The full Analytics/full-solution runs and GitHub CI still need confirmation for the final M3.5 Pull Request. None of these disposable Testcontainers tests should change your local live or replay demonstration databases.
+
+**Scope limits:** single local replay runner, local file manifest, bounded retention, fixed per-partition snapshot, no resetting of live offsets, no historical reconstruction outside retained Kafka data, and no production-grade multi-node coordination or HA. The SQL/Kafka commit boundary remains at least once and replay uses the existing idempotent SQL handler.

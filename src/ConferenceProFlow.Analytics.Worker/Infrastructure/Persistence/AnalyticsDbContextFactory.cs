@@ -1,3 +1,4 @@
+using ConferenceProFlow.Analytics.Worker.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
@@ -5,9 +6,9 @@ using Microsoft.Extensions.Configuration;
 namespace ConferenceProFlow.Analytics.Worker.Infrastructure.Persistence;
 
 /// <summary>
-/// Provides a deterministic EF Core design-time path for a Generic Host worker.
-/// Reads the same AnalyticsDb setting as the application, including the worker's
-/// own User Secrets. No credentials are hardcoded or committed to source control.
+/// Existing live Analytics design-time behavior is preserved. Explicit
+/// '-- --replay' selects the separate, guarded AnalyticsReplayDb target.
+/// No new migrations are created: both databases share one EF Core model.
 /// </summary>
 public sealed class AnalyticsDbContextFactory : IDesignTimeDbContextFactory<AnalyticsDbContext>
 {
@@ -19,12 +20,43 @@ public sealed class AnalyticsDbContextFactory : IDesignTimeDbContextFactory<Anal
             .AddEnvironmentVariables()
             .Build();
 
-        var connectionString = configuration.GetConnectionString("AnalyticsDb");
-        if (string.IsNullOrWhiteSpace(connectionString))
+        var replayRequested = args.Any(value =>
+            string.Equals(value, "--replay", StringComparison.OrdinalIgnoreCase));
+        var replayEnabled = configuration.GetValue<bool>("AnalyticsReplay:Enabled");
+
+        string? connectionString;
+        if (replayRequested)
         {
-            throw new InvalidOperationException(
-                "Missing ConnectionStrings:AnalyticsDb for EF Core design-time. " +
-                "Configure User Secrets on ConferenceProFlow.Analytics.Worker.");
+            var replay = configuration.GetSection(AnalyticsReplayOptions.SectionName)
+                .Get<AnalyticsReplayOptions>() ?? new AnalyticsReplayOptions();
+
+            var liveConnection = configuration.GetConnectionString("AnalyticsDb");
+            connectionString = configuration.GetConnectionString("AnalyticsReplayDb");
+
+            AnalyticsReplaySafety.ValidateOrThrow(
+                replay,
+                liveConnection,
+                connectionString,
+                configuration.GetValue<bool>("AnalyticsKafkaConsumer:Enabled"));
+        }
+        else
+        {
+            // Prevent a forgotten '--replay' from applying migrations to live
+            // Analytics while the user has deliberately enabled replay mode.
+            if (replayEnabled)
+            {
+                throw new InvalidOperationException(
+                    "Replay is enabled, but EF Core was called without '-- --replay'. " +
+                    "Refusing to select the live Analytics database by default.");
+            }
+
+            connectionString = configuration.GetConnectionString("AnalyticsDb");
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                throw new InvalidOperationException(
+                    "Missing ConnectionStrings:AnalyticsDb for EF Core design-time. " +
+                    "Configure Analytics Worker User Secrets.");
+            }
         }
 
         var options = new DbContextOptionsBuilder<AnalyticsDbContext>()

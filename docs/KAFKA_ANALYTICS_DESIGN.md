@@ -2,10 +2,10 @@
 
 **Milestone:** M3 — Kafka & Event Analytics  
 **Work item:** M3.1 — Kafka Analytics Architecture  
-**Status:** Reviewed architecture baseline; Kafka infrastructure (M3.2), Registration-side publishing (M3.3) and the Analytics Worker with SQL projections, quarantine and manual offsets (M3.4) implemented and locally verified. Isolated replay (M3.5) and milestone-wide hardening (M3.6) remain future work.  
+**Status:** Reviewed M3.1 design baseline; Kafka infrastructure (M3.2), Registration publishing (M3.3), durable Analytics Worker (M3.4), and isolated bounded replay with local verification and six passing Kafka/SQL integration cases (M3.5) implemented. Full M3.5 Release build and regression passed locally; PR/CI pending. M3.6 milestone review remains future work.
 **Baseline:** M2.6 Registration ↔ Allocation messaging via RabbitMQ, independent SQL Server databases, Transactional Outbox / Inbox, final registration reconciliation.
 
-## Implementation status after M3.4
+## Implementation status through M3.5
 
 | Component | Status |
 |---|---|
@@ -17,9 +17,9 @@
 | SQL/Kafka Publisher Testcontainers scenarios (including ACK/SQL fault) | Implemented and locally tested (M3.3E) |
 | Analytics Consumer, independently owned Analytics SQL projections and per-record offset commits | Implemented and locally tested (M3.4) |
 | SQL idempotency ledger and durable quarantine for malformed/conflicting events | Implemented and locally tested (M3.4) |
-| Replay group / isolated projection rebuild | Planned (M3.5) |
+| Isolated replay group, bounded offset snapshot, replay SQL projections and explicit resume | Implemented and locally regression-tested (M3.5); PR/CI pending |
 
-For Kafka publishing see [Kafka Publishing](KAFKA_PUBLISHING.md); for the implemented consumer, SQL schema and operational safety see [Analytics Worker](ANALYTICS_WORKER.md) and [Analytics E2E Demo](ANALYTICS_E2E_DEMO.md). The architecture sections below preserve the original design rationale, including **AD-05 isolated replay**, which remains planned for M3.5.
+For Kafka publishing see [Kafka Publishing](KAFKA_PUBLISHING.md); for the implemented consumer, SQL schema and operational safety see [Analytics Worker](ANALYTICS_WORKER.md) and [Analytics E2E Demo](ANALYTICS_E2E_DEMO.md). The architecture sections below preserve the original design rationale, including **AD-05 isolated replay**, which has now been implemented in M3.5.
 
 ## 1. Purpose and business requirement
 
@@ -37,7 +37,7 @@ Allocation Worker → Allocation SQL Outbox → RabbitMQ → Registration API
 Registration API → Allocation Result Inbox + Registration final status (local atomic commit)
 ```
 
-**Implemented through M3.4 (with replay still planned):**
+**Implemented through M3.4 (publishing and live analytics); M3.5 adds bounded isolated replay:**
 
 ```text
 Allocation result received by Registration API
@@ -171,7 +171,7 @@ The implemented M2.6 workflow stays functional when Kafka is disabled. The M3.4 
 - Normal M2.6 Registration ↔ Allocation processing continues when Kafka is stopped or Kafka publishing is disabled (pending Analytics Outbox rows are expected while unavailable).
 - Automated integration tests cover SQL transaction boundaries, Kafka event delivery, offset/deduplication behavior and restart cases (Docker/Testcontainers).
 
-M3.4 local checks have passed for normal 2/1 projections, catch-up after Worker restart to 2/2, and duplicate delivery without an extra count; integration tests cover malformed/conflicting events, SQL failures and offset behavior. **M3.5 isolated replay has not been carried out**, and CI/PR verification of the final M3.4 changes remains a separate gate.
+M3.4 local checks have passed for normal 2/1 projections, catch-up after Worker restart to 2/2, and duplicate delivery without an extra count; integration tests cover malformed/conflicting events, SQL failures and offset behavior. **M3.5 isolated bounded replay has now been locally demonstrated** (new session 2/1, three matching event identities, independent live offsets) and all six new Kafka/SQL Replay Runner tests passed locally. Full M3.5 regression and GitHub PR/CI remain a separate gate.
 
 ## 10. Iterative delivery plan
 
@@ -184,7 +184,7 @@ M3.4 local checks have passed for normal 2/1 projections, catch-up after Worker 
 | M3.5 | Consumer groups, controlled offset/replay demonstration, restart and fault tests |
 | M3.6 | End-to-end demo, documentation, regression testing and PR closure |
 
-**Architecture decisions AD-01–AD-04** are implemented through M3.4 with local tests; **AD-05 isolated replay** is deferred to M3.5. These decisions remain the baseline for future work: avoid introducing cross-service SQL coupling, paid/cloud dependencies, Kubernetes or a dashboard just to close the current milestones.
+**Architecture decisions AD-01–AD-04** were implemented through M3.4 with local tests; **AD-05 isolated replay** is implemented and locally verified in M3.5 (local full regression passed; PR/CI pending). These decisions remain the baseline for future work: avoid introducing cross-service SQL coupling, paid/cloud dependencies, Kubernetes or a dashboard just to close the current milestones.
 
 ## 11. Architecture review — decisions and boundaries
 
@@ -206,7 +206,17 @@ This review settles the initial implementation scope while leaving normal implem
 - Analytics failures do not roll back a completed Registration business decision. Starting the Registration API while Kafka is unavailable must remain possible when the Kafka publisher is disabled or operates with retrying background startup rather than a hard broker dependency.
 - The initial `RegistrationFinalizedV1` contract assumes a Registration finalizes once. Future cancellation or amendment events require an explicitly versioned change and different projection semantics.
 
-**Implemented review checkpoint (through M3.4):** the three services have independent database ownership; no SQL/Kafka dual-write occurs in a Registration business transaction; consumer offset commits are performed only after durable Analytics SQL processing/quarantine. The initial 2/1, stop/restart 2/2 and duplicate exercises passed locally, but production readiness, multi-instance resilience and M3.5 replay are not claimed.
+**Implemented review checkpoint (through M3.5):** the three services have independent database ownership; no SQL/Kafka dual-write occurs in a Registration business transaction; consumer offset commits are performed only after durable Analytics SQL processing/quarantine. The initial 2/1, stop/restart 2/2 and duplicate exercises passed locally. M3.5 also exercised an isolated 2/1 projection rebuild with unchanged live-group offsets and six Kafka/SQL replay test cases. Production readiness and multi-instance replay coordination are not claimed.
+
+## Replay implementation checkpoint (M3.5)
+
+M3.5 implements AD-05 using **the same Analytics Worker executable in a mutually exclusive replay mode**, not a fourth service. A separate consumer group (`conferenceproflow.analytics.replay.<run-id>`) and separate SQL database (`ConferenceProFlowAnalyticsReplay`) isolate work from the existing live group and `ConferenceProFlowAnalytics` database. The existing `AnalyticsDbContext`, EF migration, record validation, idempotent SQL processor and durable quarantine are reused.
+
+A fresh replay checks its safety configuration, requires a migrated **empty replay database** and an unused replay group, captures **per-partition `[low, highExclusive)` bounds**, persists a local snapshot manifest, and explicitly commits replay-group offsets only after durable SQL handling. It reports completion only after all captured partition high watermarks are reached. Explicit resume uses the original manifest and committed Kafka positions; unexpected gaps/retention loss abort rather than falsely claiming success. This is a **single-process local tool**, not a distributed replay scheduler.
+
+The controlled M3.5D demonstration for a fresh capacity-2 session produced **2 confirmed / 1 rejected and three matching event identities** in both live and replay Analytics SQL, while the live consumer group's offsets remained unchanged during the bounded replay. **Six M3.5E replay Testcontainers scenarios passed locally**, including SQL persistence failure/resume and a simulated missing retained Kafka record. These results do **not** establish reconstruction of already-expired history, multi-node HA, or cross-system exactly-once semantics.
+
+Runbooks: [Replay Design](KAFKA_REPLAY_DESIGN.md), [Replay Setup](KAFKA_REPLAY_SETUP.md), [Replay Runner](KAFKA_REPLAY_RUNNER.md), [Replay E2E](KAFKA_REPLAY_E2E_DEMO.md), and [Replay Integration Tests](KAFKA_REPLAY_INTEGRATION_TESTS.md).
 
 ## 12. References and scope boundaries
 
@@ -216,4 +226,4 @@ This review settles the initial implementation scope while leaving normal implem
 - Apache Kafka architecture and design documentation: https://kafka.apache.org/design/
 - Confluent Kafka .NET client documentation: https://docs.confluent.io/kafka-clients/dotnet/current/overview.html
 
-**Design/implementation status:** This document records the reviewed M3.1 **target architecture** and its implementation through **M3.4** (publisher, consumer, Analytics SQL, manual offsets, quarantine and local recovery tests). The controlled isolated projection replay of AD-05 remains for **M3.5**; milestone-wide closure and any broader hardening remain for **M3.6**. No claim of production readiness is made.
+**Design/implementation status:** Reviewed M3.1 architecture implemented through **M3.5**: publisher, durable Analytics consumer, SQL idempotency/quarantine, explicit offsets and isolated bounded projection replay of AD-05. Final M3.5 CI/PR and M3.6 milestone review/hardening remain. No claim of production readiness is made.
