@@ -10,12 +10,12 @@ GO
 SET NOCOUNT ON;
 
 -- Paste `id` from the `demoCreateSession` HTTP response below.
-DECLARE @SessionIdText nvarchar(36) = N'PASTE-SESSION-GUID-HERE';
+DECLARE @SessionIdText nvarchar(36) = N'a9e3fd76-69a5-4f64-9ff1-7112abd2c628';
 DECLARE @SessionId uniqueidentifier = TRY_CONVERT(uniqueidentifier, @SessionIdText);
 DECLARE @Capacity int = 2;
 
 IF @SessionId IS NULL
-    THROW 51001, 'Replace PASTE-SESSION-GUID-HERE with the real demo session GUID.', 1;
+    THROW 51001, 'Replace a9e3fd76-69a5-4f64-9ff1-7112abd2c628 with the real demo session GUID.', 1;
 
 IF @Capacity <= 0
     THROW 51002, 'Capacity must be positive.', 1;

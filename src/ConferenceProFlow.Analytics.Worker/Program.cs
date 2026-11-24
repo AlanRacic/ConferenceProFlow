@@ -3,48 +3,88 @@ using ConferenceProFlow.Analytics.Worker.Application.Processing;
 using ConferenceProFlow.Analytics.Worker.Configuration;
 using ConferenceProFlow.Analytics.Worker.Infrastructure.Persistence;
 using ConferenceProFlow.Analytics.Worker.Messaging.Consumers;
+using ConferenceProFlow.Analytics.Worker.Replay;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 var builder = Host.CreateApplicationBuilder(args);
+var replayEnabled = builder.Configuration.GetValue<bool>("AnalyticsReplay:Enabled");
+var liveConsumerEnabled = builder.Configuration.GetValue<bool>("AnalyticsKafkaConsumer:Enabled");
+var liveConnection = builder.Configuration.GetConnectionString("AnalyticsDb");
+string selectedConnection;
 
-// Analytics owns this database exclusively; never query Registration/Allocation.
-var analyticsConnection = builder.Configuration.GetConnectionString("AnalyticsDb");
-if (string.IsNullOrWhiteSpace(analyticsConnection))
+if (replayEnabled)
 {
-    throw new InvalidOperationException(
+    var replay = builder.Configuration.GetSection(AnalyticsReplayOptions.SectionName)
+        .Get<AnalyticsReplayOptions>() ?? new AnalyticsReplayOptions();
+    var replayConnection = builder.Configuration.GetConnectionString("AnalyticsReplayDb");
+
+    // Must happen before DbContext/consumer creation. No live SQL writes or
+    // live-group offset resets are possible from the replay path.
+    AnalyticsReplaySafety.ValidateOrThrow(
+        replay, liveConnection, replayConnection, liveConsumerEnabled);
+    selectedConnection = replayConnection!;
+    builder.Services.AddSingleton(replay);
+    builder.Services.AddSingleton<KafkaAnalyticsReplayRunner>();
+}
+else
+{
+    // M3.4 live behavior is preserved exactly when replay is disabled.
+    selectedConnection = liveConnection ?? throw new InvalidOperationException(
         "Missing ConnectionStrings:AnalyticsDb. Configure Analytics Worker User Secrets.");
+    if (string.IsNullOrWhiteSpace(selectedConnection))
+        throw new InvalidOperationException("ConnectionStrings:AnalyticsDb is empty.");
 }
 
 builder.Services.AddDbContext<AnalyticsDbContext>(options =>
-    options.UseSqlServer(analyticsConnection));
-
+    options.UseSqlServer(selectedConnection));
 builder.Services.AddScoped<AnalyticsEventProcessingService>();
 builder.Services.AddScoped<AnalyticsQuarantineService>();
 builder.Services.AddScoped<KafkaAnalyticsRecordHandler>();
 
-builder.Services
-    .AddOptions<AnalyticsKafkaConsumerOptions>()
-    .BindConfiguration(AnalyticsKafkaConsumerOptions.SectionName)
-    .Validate(options => !options.Enabled ||
-            (options.ObserveOnly ? options.IsValid() : options.IsValidForDurable()),
-        "Invalid AnalyticsKafkaConsumer configuration. Preview requires ObserveOnly=true; " +
-        "durable processing requires ObserveOnly=false and a non-preview GroupId. " +
-        "BootstrapServers, Topic and GroupId must be nonempty.")
-    .ValidateOnStart();
+if (!replayEnabled)
+{
+    builder.Services
+        .AddOptions<AnalyticsKafkaConsumerOptions>()
+        .BindConfiguration(AnalyticsKafkaConsumerOptions.SectionName)
+        .Validate(options => !options.Enabled ||
+                (options.ObserveOnly ? options.IsValid() : options.IsValidForDurable()),
+            "Invalid AnalyticsKafkaConsumer configuration. Preview requires ObserveOnly=true; " +
+            "durable processing requires ObserveOnly=false and a non-preview GroupId. " +
+            "BootstrapServers, Topic and GroupId must be nonempty.")
+        .ValidateOnStart();
 
-if (!builder.Configuration.GetValue<bool>("AnalyticsKafkaConsumer:Enabled"))
-{
-    builder.Services.AddHostedService<AnalyticsWorkerBackgroundService>();
+    if (!liveConsumerEnabled)
+        builder.Services.AddHostedService<AnalyticsWorkerBackgroundService>();
+    else if (builder.Configuration.GetValue<bool>("AnalyticsKafkaConsumer:ObserveOnly", true))
+        builder.Services.AddHostedService<KafkaAnalyticsConsumerPreviewService>();
+    else
+        builder.Services.AddHostedService<KafkaAnalyticsConsumerService>();
 }
-else if (builder.Configuration.GetValue<bool>("AnalyticsKafkaConsumer:ObserveOnly", true))
+
+using var host = builder.Build();
+if (replayEnabled)
 {
-    // Existing M3.4C preview deliberately does NOT write to SQL or commit offsets.
-    builder.Services.AddHostedService<KafkaAnalyticsConsumerPreviewService>();
+    // One-shot command, not an indefinite hosted service. On any failure the
+    // process exits NON-ZERO; it cannot look like a successful replay.
+    using var cancellation = new CancellationTokenSource();
+    ConsoleCancelEventHandler cancel = (_, e) =>
+    {
+        e.Cancel = true;
+        cancellation.Cancel();
+    };
+    Console.CancelKeyPress += cancel;
+    try
+    {
+        await host.Services.GetRequiredService<KafkaAnalyticsReplayRunner>()
+            .RunAsync(cancellation.Token);
+    }
+    finally
+    {
+        Console.CancelKeyPress -= cancel;
+    }
 }
 else
 {
-    // M3.4E: one record at a time, SQL-first, then explicit Kafka offset commit.
-    builder.Services.AddHostedService<KafkaAnalyticsConsumerService>();
+    await host.RunAsync();
 }
-
-await builder.Build().RunAsync();

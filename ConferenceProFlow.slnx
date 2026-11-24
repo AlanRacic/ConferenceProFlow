@@ -5,6 +5,12 @@
     <File Path="docs/KAFKA_ANALYTICS_DESIGN.md" />
     <File Path="docs/KAFKA_LOCAL_DEVELOPMENT.md" />
     <File Path="docs/KAFKA_PUBLISHING.md" />
+    <File Path="docs/KAFKA_REPLAY_COMPARISON.sql" />
+    <File Path="docs/KAFKA_REPLAY_DESIGN.md" />
+    <File Path="docs/KAFKA_REPLAY_E2E_DEMO.md" />
+    <File Path="docs/KAFKA_REPLAY_INTEGRATION_TESTS.md" />
+    <File Path="docs/KAFKA_REPLAY_RUNNER.md" />
+    <File Path="docs/KAFKA_REPLAY_SETUP.md" />
     <File Path="docs/LOCAL_DEVELOPMENT.md" />
     <File Path="docs/MESSAGING_DESIGN.md" />
     <File Path="docs/PROJECT_CHARTER.md" />
