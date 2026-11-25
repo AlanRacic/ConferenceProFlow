@@ -46,12 +46,34 @@ public sealed class KafkaAnalyticsReplayRunner(
         };
     }
 
-    public static string GetManifestPath(string groupId)
+    /// <summary>
+    /// Resolves a stable snapshot manifest location. By default, use the user's
+    /// persistent local application-data directory, not the OS temp directory.
+    /// An explicit override must be an absolute path (outside the repository).
+    /// Do not silently fall back to temp: a lost manifest prevents safe Resume.
+    /// </summary>
+    public static string GetManifestPath(string groupId, string? snapshotDirectory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(groupId);
+        string directory;
+        if (string.IsNullOrWhiteSpace(snapshotDirectory))
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localAppData))
+                throw new InvalidOperationException(
+                    "Local application-data directory is unavailable. Set AnalyticsReplay:SnapshotDirectory to an absolute path.");
+            directory = Path.Combine(localAppData, "ConferenceProFlow", "ReplaySnapshots");
+        }
+        else
+        {
+            if (!Path.IsPathFullyQualified(snapshotDirectory))
+                throw new InvalidOperationException(
+                    "AnalyticsReplay:SnapshotDirectory must be an absolute directory path.");
+            directory = snapshotDirectory;
+        }
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes(groupId));
         var stableId = Convert.ToHexString(digest)[..20];
-        return Path.Combine(Path.GetTempPath(), "ConferenceProFlow", "ReplaySnapshots", stableId + ".json");
+        return Path.Combine(Path.GetFullPath(directory), stableId + ".json");
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -64,7 +86,7 @@ public sealed class KafkaAnalyticsReplayRunner(
         await CheckReplayDatabaseAsync(requireEmpty: !settings.Resume, cancellationToken);
 
         var config = CreateConsumerConfig(settings);
-        var manifestPath = GetManifestPath(settings.GroupId);
+        var manifestPath = GetManifestPath(settings.GroupId, settings.SnapshotDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
         // A local, exclusive per-group lock prevents two simultaneous replay
         // processes from using the same group and manifest on this machine.

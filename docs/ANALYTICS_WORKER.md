@@ -1,6 +1,6 @@
 # ConferenceProFlow — Analytics Worker and Isolated Replay (M3.4–M3.5)
 
-**Status:** M3.4 durable analytics implemented and merged; M3.5 isolated bounded replay implemented, locally demonstrated and six replay integration cases passed. Full M3.5 local Release build and regression passed; PR/CI pending.  
+**Status:** M3.4 durable Analytics and M3.5 bounded isolated replay implemented, tested and merged. M3.6E1 replay snapshot durability locally regression-tested; final M3.6 PR/CI pending.  
 **Runtime:** .NET 10 Generic Host (no HTTP API or dashboard).  
 **Ownership:** `ConferenceProFlowAnalytics` is owned by the Analytics Worker and is independent of Registration and Allocation databases.  
 **Scope:** One active Analytics Worker and one durable Kafka consumer group; **not a validated multi-replica production deployment**.
@@ -212,9 +212,9 @@ The script `scripts/demo/Replay-AnalyticsFinalization.ps1` resends **one** origi
 
 The **same .NET 10 Analytics Worker** now supports mutually exclusive live and one-shot replay modes. In replay mode, `AnalyticsReplay:Enabled=true` and `AnalyticsKafkaConsumer:Enabled=false`. A guard requires an isolated SQL connection to **`ConferenceProFlowAnalyticsReplay`** on the same SQL Server, a replay-only Kafka consumer group (`conferenceproflow.analytics.replay.<run-id>`), and the supported `conferenceproflow.registration-finalized.v1` topic. It reuses the existing `AnalyticsDbContext`, initial migration, record handler, SQL idempotency ledger, projections and quarantine — not a second business-logic implementation.
 
-The replay runner first captures **each Kafka partition's earliest retained offset and exclusive high watermark**. It writes a local JSON manifest at `%TEMP%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json` and reads exactly those captured ranges. Every successfully applied/recognized duplicate/durably quarantined record is followed by a **manual commit for the replay group**; replay ends only when all captured windows are complete. An interrupted run can explicitly resume with the same snapshot, replay group and SQL state; a completed run cannot be resumed. Missing records caused by retention stop replay instead of silently skipping a gap.
+The replay runner first captures **each Kafka partition's earliest retained offset and exclusive high watermark**. It writes a local JSON manifest at `%LOCALAPPDATA%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json` (Windows default since M3.6E1) and reads exactly those captured ranges. Every successfully applied/recognized duplicate/durably quarantined record is followed by a **manual commit for the replay group**; replay ends only when all captured windows are complete. An interrupted run can explicitly resume with the same snapshot, replay group and SQL state; a completed run cannot be resumed. Missing records caused by retention stop replay instead of silently skipping a gap.
 
-Manual M3.5D verification of a **fresh** session (capacity two) showed matching **2 confirmed / 1 rejected** SQL projections and **three identical finalized-event identities** in live and replay databases, while the live Kafka group offsets stayed unchanged across the isolated replay. Six SQL Server/Kafka Testcontainers replay cases passed locally in M3.5E after a clean rebuild. The M3.5 full-solution Release build and regression passed locally on 24 November 2026; PR and GitHub Actions CI remain pending.
+Manual M3.5D verification of a **fresh** session (capacity two) showed matching **2 confirmed / 1 rejected** SQL projections and **three identical finalized-event identities** in live and replay databases, while the live Kafka group offsets stayed unchanged across the isolated replay. Six SQL Server/Kafka Testcontainers replay cases passed locally in M3.5E after a clean rebuild. The M3.5 full-solution Release build and regression passed locally on 24 November 2026; the M3.5 Pull Request subsequently passed GitHub Actions and was merged.
 
 Read [Replay Design](KAFKA_REPLAY_DESIGN.md), [Replay Setup](KAFKA_REPLAY_SETUP.md), [Replay Runner](KAFKA_REPLAY_RUNNER.md), [Replay E2E](KAFKA_REPLAY_E2E_DEMO.md), and [Replay Integration Tests](KAFKA_REPLAY_INTEGRATION_TESTS.md). Replay reconstructs **retained events only**; it is not an unlimited historical archive or a replacement for existing live statistics.
 
@@ -226,6 +226,12 @@ Read [Replay Design](KAFKA_REPLAY_DESIGN.md), [Replay Setup](KAFKA_REPLAY_SETUP.
 - **Quarantine is not remediation:** malformed or conflicting events are stored for manual analysis, not automatically corrected or routed to a production dead-letter process.
 - **Local only:** Docker-based Kafka is a single-node development cluster; no production secrets management, HA, alerting, SLOs or disaster-recovery guarantee is provided.
 - **Focused metrics:** only finalized confirmed/rejected counts by session; no dashboard, time-series aggregates, cancellation/amendment handling or privacy-governed operational API.
-- **M3.5 implemented locally:** replay uses a new group, isolated SQL and bounded snapshot; the runner is single-process/local-file coordinated, not a multi-node production replay platform. M3.6 covers milestone-wide verification/documentation gates.
+- **M3.5 implemented locally:** replay uses a new group, isolated SQL and bounded snapshot; the runner is single-process/local-file coordinated, not a multi-node production replay platform. M3.6 locally completed milestone-wide audit and hardening; the final M3.6 PR/CI check is pending.
 
 **Do not reset live Kafka offsets, delete live projection tables or run `docker compose down -v` to satisfy a demo.** A green integration test suite does not imply full production readiness.
+
+## M3.6 hardening note
+
+The bounded Replay Runner's manifest location now defaults to `%LOCALAPPDATA%\ConferenceProFlow\ReplaySnapshots` on Windows, not the temporary directory. An absolute `AnalyticsReplay:SnapshotDirectory` can be set in User Secrets; retain exactly the same path for an interrupted run and explicit `Resume=true`. This is local persistence, **not** shared HA or backup storage. See [Replay Snapshot Storage](REPLAY_SNAPSHOT_STORAGE.md).
+
+The Registration-owned Kafka Outbox also gained diagnostic-only categories, threshold-based error logs and read-only SQL inspection guidance; it does not change the Analytics consumer SQL/offset transaction boundary or introduce producer-side quarantine. See [Kafka Outbox Operational Visibility](KAFKA_OUTBOX_OPERATIONAL_VISIBILITY.md).

@@ -1,6 +1,6 @@
 # ConferenceProFlow — Kafka Replay & Consumer Groups (M3.5)
 
-**Status:** M3.5A design baseline implemented through M3.5E and locally verified (controlled 2/1 replay + six replay Kafka/SQL integration test cases); M3.5F local Release build and full regression passed; PR/CI pending.  
+**Status:** M3.5 architecture and bounded replay implemented, manually demonstrated, six Kafka/SQL integration cases locally passed, and feature PR merged after CI; M3.6 snapshot-path hardening tested locally, M3.6 PR/CI pending.  
 **Parent design:** [`KAFKA_ANALYTICS_DESIGN.md`](KAFKA_ANALYTICS_DESIGN.md), decision AD-05.  
 **Baseline:** M3.4 durable `KafkaAnalyticsConsumerService`, `KafkaAnalyticsRecordHandler`, idempotent SQL processing, quarantine and explicit offset commits.
 
@@ -111,4 +111,8 @@ No automatic replacement of live Analytics projections, no reset of live offsets
 - **M3.5E:** SQL/Kafka Testcontainers integration and failure/restart tests.
 - **M3.5F:** docs, Release build, full regression, PR/CI and milestone handoff.
 
-**Implementation review checkpoint:** the implemented runner reuses the M3.4 processor and EF Core migration, uses strict configuration safety checks, and refuses to report success on unexpected offset gaps. The local demonstration and six replay integration test cases passed. Full M3.5 regression passed locally. GitHub Actions CI and M3.6 hardening remain separate gates.
+**Implementation review checkpoint:** the implemented runner reuses the M3.4 processor and EF Core migration, uses strict configuration safety checks, and refuses to report success on unexpected offset gaps. The local demonstration and six replay integration test cases passed. Full M3.5 regression and GitHub Actions CI passed and the PR was merged. M3.6 hardening was subsequently validated locally; the M3.6 PR/CI gate remains open.
+
+## M3.6 refinement — manifest location
+
+Replay's local snapshot file now defaults to per-user LocalApplicationData rather than the OS temp directory, with an optional absolute `AnalyticsReplay:SnapshotDirectory` override. This is a storage-hardening change, not a change to replay isolation, partition windows, recovery group semantics or Kafka retention. Preserve the original manifest if resuming an older unfinished run. See [Replay Snapshot Storage](REPLAY_SNAPSHOT_STORAGE.md).

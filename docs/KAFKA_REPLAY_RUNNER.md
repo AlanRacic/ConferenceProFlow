@@ -1,6 +1,6 @@
 # ConferenceProFlow — Bounded Kafka Replay Runner (M3.5C)
 
-**Status:** Implemented M3.5C; M3.5D live/replay comparison passed locally and six Kafka + SQL Server M3.5E Replay Runner integration cases passed after a clean rebuild. M3.5F Release build and full regression passed locally; PR/CI pending.  
+**Status:** M3.5 replay runner implemented, manually demonstrated and verified with six Kafka/SQL Testcontainers scenarios; M3.5 merged after CI. M3.6E1 updates snapshot storage and passed focused + six-runner local regressions; M3.6 PR/CI pending.  
 **Prerequisites:** M3.5B replay safety guards and an **empty, migrated** `ConferenceProFlowAnalyticsReplay` database.  
 **Related:** [`KAFKA_REPLAY_DESIGN.md`](KAFKA_REPLAY_DESIGN.md) · [`KAFKA_REPLAY_SETUP.md`](KAFKA_REPLAY_SETUP.md) · [`ANALYTICS_WORKER.md`](ANALYTICS_WORKER.md).
 
@@ -90,9 +90,9 @@ After successful verification set `AnalyticsReplay:Enabled=false` in User Secret
 
 The snapshot is stored locally outside the repository:
 
-`%TEMP%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json`
+`%LOCALAPPDATA%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json` (Windows default since M3.6E1; override with an **absolute** `AnalyticsReplay:SnapshotDirectory`)
 
-The exact path appears in the logs. The file contains topic, broker, replay group, expected database name, snapshot bounds, per-partition progress, counters and completion status; **no SQL passwords or Kafka payloads**. A sibling `.lock` file is used only for a process-level lock. Do not commit the manifest to the repository.
+The exact path appears in the logs. Previous M3.5 `%TEMP%` manifests are not automatically moved: consult [Replay Snapshot Storage](REPLAY_SNAPSHOT_STORAGE.md) before attempting to resume an unfinished older run. The file contains topic, broker, replay group, expected database name, snapshot bounds, per-partition progress, counters and completion status; **no SQL passwords or Kafka payloads**. A sibling `.lock` file is used only for a process-level lock. Do not commit the manifest to the repository.
 
 If the replay is interrupted or an SQL/Kafka operation fails:
 
@@ -141,7 +141,7 @@ For comparison, query the live group **read-only** with `--group conferenceprofl
 
 ## 6. Automated checks and limitations
 
-M3.5C adds focused tests for exclusive high watermark logic, empty partitions, offset-gap rejection, manifest round-trip and automatic-commit configuration. **Real Kafka + SQL replay integration tests (including failures and multi-partition behavior) belong to M3.5E.**
+M3.5C adds focused tests for exclusive high watermark logic, empty partitions, offset-gap rejection, manifest round-trip and automatic-commit configuration. **Real Kafka + SQL replay integration tests (including failures and multi-partition behavior) were added and passed in M3.5E.**
 
 ```powershell
 
@@ -158,3 +158,7 @@ dotnet test tests/ConferenceProFlow.Analytics.IntegrationTests/ConferenceProFlow
 - The local filesystem manifest is a **demonstration artifact**, not a production distributed checkpoint store. Resume requires the original machine's manifest (or controlled transfer).
 - Replay has at-least-once Kafka delivery and uses the same durable SQL idempotency/quarantine semantics as the live worker. No cross-system exactly-once claim.
 - M3.5D adds a controlled fresh-session projection comparison; M3.5E adds real infrastructure regression and failure/recovery integration tests.
+
+## M3.6E1 snapshot storage upgrade
+
+The OS temporary path is no longer the default for **new** manifests. The runner uses a persistent per-user LocalApplicationData folder; `AnalyticsReplay:SnapshotDirectory` can override it with an absolute path. Relative overrides are rejected and a missing default user data directory causes a fail-closed error. Original Kafka offset/watermark and SQL idempotency semantics are unchanged. See [Replay Snapshot Storage](REPLAY_SNAPSHOT_STORAGE.md).

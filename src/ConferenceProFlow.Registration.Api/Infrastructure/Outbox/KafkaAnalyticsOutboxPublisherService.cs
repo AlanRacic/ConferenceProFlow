@@ -9,7 +9,7 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 /// <summary>
 /// Single-active-instance development publisher for RegistrationFinalizedV1 events.
 /// Kafka may receive the same logical event twice if SQL publication-state persistence
-/// fails after a successful Kafka acknowledgement. M3.4 consumer must be idempotent.
+/// fails after a successful Kafka acknowledgement. Analytics consumers must be idempotent.
 /// Multi-instance coordination / leasing is NOT implemented.
 /// </summary>
 public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
@@ -21,6 +21,7 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<KafkaAnalyticsOutboxPublisherService> _logger;
     private readonly string _topic;
+    private readonly int _alertAfterAttempts;
     private readonly IProducer<string, string> _producer;
 
     public KafkaAnalyticsOutboxPublisherService(
@@ -39,6 +40,12 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
         _topic = configuration["Kafka:RegistrationFinalizedTopic"] ?? DefaultTopic;
         if (string.IsNullOrWhiteSpace(_topic))
             throw new InvalidOperationException("Kafka topic must not be empty.");
+
+        _alertAfterAttempts = configuration.GetValue<int?>("KafkaAnalyticsPublisher:AlertAfterAttempts")
+            ?? AnalyticsOutboxPublishAlertPolicy.DefaultAlertAfterAttempts;
+        if (!AnalyticsOutboxPublishAlertPolicy.IsValidThreshold(_alertAfterAttempts))
+            throw new InvalidOperationException(
+                "KafkaAnalyticsPublisher:AlertAfterAttempts must be between 1 and 10000.");
 
         _producer = new ProducerBuilder<string, string>(new ProducerConfig
         {
@@ -122,6 +129,8 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
 
         // All retries must use the *original* durable payload and MessageId.
         // There must not be a fresh RegistrationFinalizedV1.Create() call here.
+        // Failure category is for observability ONLY: no automatic discard or quarantine.
+        var payloadValidated = false;
         try
         {
             if (outbox.MessageType != RegistrationFinalizedV1.EventType)
@@ -134,6 +143,7 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
                 integrationEvent.RegistrationId != outbox.RegistrationId)
                 throw new InvalidOperationException("Analytics outbox identity does not match its payload.");
 
+            payloadValidated = true;
             await _producer.ProduceAsync(_topic, new Message<string, string>
             {
                 Key = integrationEvent.SessionId.ToString("D"),
@@ -151,15 +161,35 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
         }
         catch (Exception ex)
         {
-            // Keep this row pending. SQL failure here is retried by the outer loop.
-            // Failure details are intentionally bounded to fit the SQL column.
+            // Keep this row pending. Do NOT mark it published or silently discard it.
+            // Retain the existing exponential backoff (capped at 60 seconds).
+            // If this SQL write fails, the outer polling loop will retry.
+            var kind = AnalyticsOutboxPublishAlertPolicy.Classify(ex, payloadValidated);
             var retrySeconds = Math.Min(60, Math.Pow(2, Math.Min(outbox.PublishAttempts, 6)));
-            outbox.RecordPublishFailure(DateTimeOffset.UtcNow,
-                ex.GetType().Name + ": " + ex.Message,
+            outbox.RecordPublishFailure(
+                DateTimeOffset.UtcNow,
+                AnalyticsOutboxPublishAlertPolicy.Describe(kind, ex),
                 TimeSpan.FromSeconds(retrySeconds));
             await db.SaveChangesAsync(cancellationToken);
-            _logger.LogWarning("Kafka Analytics publish failed for {MessageId}; attempt {Attempt}",
-                outbox.Id, outbox.PublishAttempts);
+
+            if (AnalyticsOutboxPublishAlertPolicy.ShouldEscalate(
+                    outbox.PublishAttempts, _alertAfterAttempts))
+            {
+                // Escalate periodically (not every retry) so persistent failures are visible.
+                // Operators must inspect the row; KafkaDelivery is not necessarily transient.
+                _logger.LogError(
+                    "Kafka Analytics Outbox requires attention: MessageId {MessageId}, RegistrationId {RegistrationId}, " +
+                    "Category {FailureCategory}, Attempts {Attempts}, NextAttemptAtUtc {NextAttemptAtUtc}. " +
+                    "Event remains pending; inspect AnalyticsOutboxMessages.",
+                    outbox.Id, outbox.RegistrationId, kind, outbox.PublishAttempts, outbox.NextAttemptAtUtc);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Kafka Analytics publish failed: MessageId {MessageId}, Category {FailureCategory}, " +
+                    "Attempts {Attempts}, NextAttemptAtUtc {NextAttemptAtUtc}",
+                    outbox.Id, kind, outbox.PublishAttempts, outbox.NextAttemptAtUtc);
+            }
             return;
         }
 

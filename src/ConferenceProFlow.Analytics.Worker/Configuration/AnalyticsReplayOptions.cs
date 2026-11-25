@@ -17,6 +17,12 @@ public sealed class AnalyticsReplayOptions
     public string BootstrapServers { get; set; } = "127.0.0.1:9092";
     public string Topic { get; set; } = FinalizedTopic;
     public string GroupId { get; set; } = string.Empty;
+    /// <summary>
+    /// Optional absolute path for durable replay snapshot manifests. If omitted,
+    /// use the current user's LocalApplicationData/ConferenceProFlow/ReplaySnapshots.
+    /// Keep this location stable between an interrupted run and Resume=true.
+    /// </summary>
+    public string? SnapshotDirectory { get; set; }
     public bool Resume { get; set; }
     public int MaxIdleSeconds { get; set; } = 60;
 }

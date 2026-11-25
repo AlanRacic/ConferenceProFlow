@@ -8,7 +8,7 @@ ConferenceProFlow is an incremental, production-aware backend portfolio project 
 
 It is intentionally designed to run on a developer machine with Docker and .NET **without paid cloud services**. The platform is **not yet a production-ready public service**; implementation boundaries and remaining work are documented explicitly.
 
-## Implemented Architecture (through M3.5)
+## Implemented Architecture (through M3.6 hardening)
 
 ```text
 Registration API (.NET 10)
@@ -106,6 +106,7 @@ The Registration API and Allocation Worker **own separate operational databases*
 - A fourth *logical* SQL database, `ConferenceProFlowAnalyticsReplay`, on the **same** local SQL Server container, populated using the existing `AnalyticsDbContext`/migration; the live Analytics database remains independent.
 - SQL/Kafka Testcontainers replay integration tests for empty/multiple partitions, duplicates, quarantine, late records, SQL failure/resume, completed-run guard and loss of retained records.
 - GitHub Actions build/test workflow.
+- M3.6 local hardening: persistent per-user replay snapshot directory (configurable absolute path) and structured Kafka Analytics Outbox failure diagnostics with threshold-based log alerts, without changing delivery/retry semantics.
 
 **M2.6 verified locally:** A session with capacity 2 received three registrations; two became `Confirmed`, one `Rejected`, and Registration/Allocation databases agreed on the results. A separate recovery exercise showed a registration remained `Pending` while the Allocation Worker was stopped and completed after the Worker restarted. This is a targeted manual demonstration, not exhaustive failure testing.
 
@@ -113,7 +114,9 @@ The Registration API and Allocation Worker **own separate operational databases*
 
 **M3.4 locally verified:** A fresh capacity-2 session produces 2 Confirmed / 1 Rejected both in the authoritative operational workflow and in Analytics SQL; stopping Analytics Worker while a fourth registration is rejected leaves a temporary 2/1 projection, then restarting with the same consumer group catches up to 2/2. Re-publishing the original Kafka event (`MessageId` unchanged) is recognized as a duplicate without incrementing counts. Local Release build, regression tests, and the M3.4 Pull Request CI were reported successful.
 
-**M3.5 locally validated (feature PR/CI pending):** A fresh capacity-2 session reached 2 Confirmed / 1 Rejected in both live and replay Analytics SQL; the three finalized events matched by identity, and live consumer-group offsets stayed unchanged across the bounded replay. Six new Kafka + SQL Server Testcontainers replay test cases also passed locally, including injected SQL failure and explicit resume, and retention-gap refusal. Full Analytics regression, the complete solution Release build and the full solution regression suite passed locally on 24 November 2026; Pull Request review and GitHub Actions CI are still pending.
+**M3.5 locally and CI validated (merged):** A fresh capacity-2 session reached 2 Confirmed / 1 Rejected in both live and replay Analytics SQL; the three finalized events matched by identity, and live consumer-group offsets stayed unchanged across the bounded replay. Six new Kafka + SQL Server Testcontainers replay test cases also passed locally, including injected SQL failure and explicit resume, and retention-gap refusal. Full Analytics regression, the complete solution Release build and the full solution regression suite passed locally on 24 November 2026; the M3.5 Pull Request subsequently passed CI and was merged.
+
+**M3.6 local validation (PR/CI pending):** Architecture, resilience, configuration/security and clean-clone reproducibility reviews were completed. A fresh clone restored tools and packages and built successfully. Kafka Replay snapshots now default to per-user LocalApplicationData (with an optional absolute `SnapshotDirectory`), and repeated Kafka Analytics Outbox failures have diagnostic categories and configurable structured-log escalation (default threshold: 5 failed attempts). Focused unit/integration regressions and a full Release build/full-solution test run passed locally on 25 November 2026. This is **not** a claim of production-grade monitoring or high availability.
 
 ## Technology Stack
 
@@ -126,7 +129,7 @@ The Registration API and Allocation Worker **own separate operational databases*
 | Testing | xUnit v3, Testcontainers for .NET, SQL Server / RabbitMQ / Kafka integration tests |
 | Development | Docker Compose, User Secrets, Visual Studio, GitHub Actions CI |
 
-Kafka infrastructure and **Registration-side Kafka publishing** are implemented through M3.3; **Analytics consumption, SQL projections and quarantine** are implemented through M3.4. Controlled isolated replay (M3.5) is implemented and locally verified; Kubernetes, distributed observability and performance qualification remain later work. MassTransit is **not used** by the implemented RabbitMQ pipeline.
+Kafka infrastructure and **Registration-side Kafka publishing** are implemented through M3.3; **Analytics consumption, SQL projections and quarantine** are implemented through M3.4. Controlled isolated replay (M3.5) and targeted M3.6 local hardening are implemented and locally verified; Kubernetes, distributed observability and performance qualification remain later work. MassTransit is **not used** by the implemented RabbitMQ pipeline.
 
 ## Quick Start (Local)
 
@@ -134,15 +137,15 @@ Kafka infrastructure and **Registration-side Kafka publishing** are implemented 
 
 1. Copy `.env.example` to `.env`, setting local SQL Server and RabbitMQ credentials. The private `.env` must never be committed.
 2. Configure separate Registration and Allocation SQL connection strings and RabbitMQ settings through each project's **User Secrets**.
-3. Apply the existing EF Core migrations for **both** databases if not already applied.
-4. From the repository root, start the local infrastructure:
+3. **Start Docker infrastructure before applying migrations**, from the repository root:
 
    ```powershell
    docker compose --env-file .env -f infrastructure/compose.yaml up -d
    ```
 
-5. Run the Registration API (HTTPS profile) and Allocation Worker (Development profile) in two terminals or through Visual Studio. In the Registration API User Secrets enable `OutboxPublisher:Enabled` and `AllocationResultConsumer:Enabled`; in the Allocation Worker User Secrets enable `RabbitMqConsumer:Enabled`, `AllocationInboxProcessor:Enabled` and `AllocationOutboxPublisher:Enabled`. These services also require each application's existing database/RabbitMQ settings.
-6. Follow the [end-to-end allocation demo](docs/ALLOCATION_E2E_DEMO.md): create a conference and session, provision **development-only** inventory, submit three registrations, then verify the final statuses in the Registration API and both databases.
+4. Run `dotnet tool restore`, then **apply the existing** Registration and Allocation EF Core migrations (only if not already applied). SQL Server must be ready and the appropriate Development/User Secrets configuration present; use the exact commands in [Local Development](docs/LOCAL_DEVELOPMENT.md). Do not create new initial migrations.
+5. Run the Registration API (HTTPS profile) and Allocation Worker (Development profile) in two terminals or through Visual Studio. In Registration API User Secrets enable `OutboxPublisher:Enabled` and `AllocationResultConsumer:Enabled`; in Allocation Worker User Secrets enable `RabbitMqConsumer:Enabled`, `AllocationInboxProcessor:Enabled` and `AllocationOutboxPublisher:Enabled`.
+6. Follow the [end-to-end allocation demo](docs/ALLOCATION_E2E_DEMO.md): create a conference and session, provision **development-only** inventory, submit three registrations, then verify final statuses in the API and both databases.
 
 The Registration API HTTPS development endpoint is `https://localhost:7217`. Its example requests are in [`docs/REGISTRATION_API.http`](docs/REGISTRATION_API.http). The OpenAPI JSON is exposed in Development at `/openapi/v1.json`; interactive Swagger UI is not configured.
 
@@ -152,7 +155,7 @@ Follow [Kafka Local Development](docs/KAFKA_LOCAL_DEVELOPMENT.md) to start the o
 
 To **consume** these finalized events and build SQL projections, configure the independent `ConferenceProFlow.Analytics.Worker` as documented in [Analytics Worker (M3.4)](docs/ANALYTICS_WORKER.md). Apply the existing `InitialAnalyticsPersistence` EF Core migration in a new development environment, keep its own `ConnectionStrings:AnalyticsDb` in User Secrets, then opt into durable consumption with `AnalyticsKafkaConsumer:Enabled=true`, `ObserveOnly=false` and `GroupId=conferenceproflow.analytics.v1`. The [Analytics E2E guide](docs/ANALYTICS_E2E_DEMO.md) demonstrates a fresh-session 2/1 projection, catch-up after restart to 2/2, and duplicate safety.
 
-For a **separate, bounded projection rebuild**, see [Kafka Replay Design](docs/KAFKA_REPLAY_DESIGN.md), [Replay Setup](docs/KAFKA_REPLAY_SETUP.md), [Replay Runner](docs/KAFKA_REPLAY_RUNNER.md), and [Replay E2E Demonstration](docs/KAFKA_REPLAY_E2E_DEMO.md). Use a distinct `AnalyticsReplay:GroupId` prefixed `conferenceproflow.analytics.replay.`, `ConnectionStrings:AnalyticsReplayDb` targeting `ConferenceProFlowAnalyticsReplay`, and `AnalyticsKafkaConsumer:Enabled=false` while `AnalyticsReplay:Enabled=true`. Never run replay against the live Analytics database or reset the live group's offsets.
+For a **separate, bounded projection rebuild**, see [Kafka Replay Design](docs/KAFKA_REPLAY_DESIGN.md), [Replay Setup](docs/KAFKA_REPLAY_SETUP.md), [Replay Runner](docs/KAFKA_REPLAY_RUNNER.md), and [Replay E2E Demonstration](docs/KAFKA_REPLAY_E2E_DEMO.md). Use a distinct `AnalyticsReplay:GroupId` prefixed `conferenceproflow.analytics.replay.`, `ConnectionStrings:AnalyticsReplayDb` targeting `ConferenceProFlowAnalyticsReplay`, and `AnalyticsKafkaConsumer:Enabled=false` while `AnalyticsReplay:Enabled=true`. Never run replay against the live Analytics database or reset the live group's offsets. After M3.6E1, snapshots default to `%LOCALAPPDATA%\ConferenceProFlow\ReplaySnapshots` on Windows; see [Snapshot Storage](docs/REPLAY_SNAPSHOT_STORAGE.md) before resuming an older interrupted run.
 
 Kafka remains **optional for the M2 RabbitMQ registration/allocation workflow**. When an Analytics Worker is disabled, Registration finalization is unaffected and Kafka events are retained only for the configured topic retention period.
 
@@ -216,11 +219,19 @@ The current GitHub Actions workflow runs restore, Release build, Docker availabi
 - [Replay E2E Demo and Cross-DB Comparison (M3.5D)](docs/KAFKA_REPLAY_E2E_DEMO.md)
 - [Replay Automated Integration Tests (M3.5E)](docs/KAFKA_REPLAY_INTEGRATION_TESTS.md)
 
+- [Enterprise Integration Audit (M3.6A)](docs/ENTERPRISE_INTEGRATION_REVIEW.md)
+- [Resilience Review (M3.6B)](docs/ENTERPRISE_RESILIENCE_REVIEW.md)
+- [Configuration and Security Review (M3.6C)](docs/CONFIGURATION_SECURITY_REVIEW.md)
+- [Local Reproducibility Review (M3.6D)](docs/LOCAL_REPRODUCIBILITY_REVIEW.md)
+- [Durable Replay Snapshot Storage (M3.6E1)](docs/REPLAY_SNAPSHOT_STORAGE.md)
+- [Kafka Outbox Operational Visibility (M3.6E2)](docs/KAFKA_OUTBOX_OPERATIONAL_VISIBILITY.md)
+- [M3 Milestone Validation & Limitations (M3.6F)](docs/M3_MILESTONE_VALIDATION.md)
+
 ## Project Status and Next Steps
 
-**M1 — Core Registration API: complete. M2 — RabbitMQ Messaging & Allocation: complete. M3.1–M3.4 — Kafka design, infrastructure, publication and durable Analytics Worker: complete and merged. M3.5 — isolated bounded Kafka replay: implemented, locally demonstrated and verified with full-solution regression tests; PR review and GitHub Actions CI pending.**
+**M1 — Core Registration API: complete. M2 — RabbitMQ Messaging & Allocation: complete. M3.1–M3.5 — Kafka architecture, infrastructure, publishing, durable Analytics Worker and bounded isolated Replay: implemented and merged after CI checks. M3.6 — enterprise integration review and narrowly targeted hardening: locally validated; final Pull Request / GitHub CI pending.**
 
-Next: **open the M3.5 Pull Request and verify GitHub Actions CI**, followed by the M3.6 milestone-wide review/hardening. Automatic session inventory provisioning, production authentication and operational monitoring remain separate future work.
+Next: review the final M3.6 changes, run GitHub Actions for the M3.6 Pull Request, merge only after checks pass, and then close the M3 milestone. Automatic session inventory provisioning, production authentication, distributed publisher coordination and external operational monitoring remain separate future work.
 
 ### Explicit Current Limitations
 

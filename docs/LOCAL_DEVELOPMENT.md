@@ -1,6 +1,18 @@
 # ConferenceProFlow — Local Development
 
-> Updated through **M3.5**: M2.6 implements bidirectional RabbitMQ, M3.2–M3.3 add Kafka and reliable finalization publishing, M3.4 adds a durable SQL-backed Analytics Worker, and M3.5 adds **guarded, isolated bounded Kafka replay**. Replay/analytics remain local development capabilities, not a claim of production readiness.
+> Updated through **M3.6 (locally validated; PR/CI pending)**: M2.6 implements bidirectional RabbitMQ, M3.2–M3.3 add Kafka and reliable finalization publishing, M3.4 adds a durable SQL-backed Analytics Worker, and M3.5 adds **guarded, isolated bounded Kafka replay**. M3.6 hardens replay snapshot storage and Kafka Outbox diagnostics. Replay/analytics remain local development capabilities, not a claim of production readiness.
+
+## First-time setup — safe order
+
+For a **new clone**, use this sequence; individual commands and secrets examples are documented below:
+
+1. Copy `.env.example` to `.env` and configure local-only credentials. Do not commit `.env` or User Secrets.
+2. Restore local tools (`dotnet tool restore`) and set up each project's User Secrets.
+3. **Start Docker SQL Server and RabbitMQ first:** `docker compose --env-file .env -f infrastructure/compose.yaml up -d`. Verify readiness.
+4. Apply **existing** Registration and Allocation EF Core migrations. Do not generate new initial migrations. Optional Analytics/Replay migrations require their own connection strings and explicit setup described later.
+5. Start Registration API and Allocation Worker, then run the guarded E2E allocation demo. Enable the optional Kafka Compose profile and Analytics Worker only when testing analytics.
+
+A separate clean clone was restored and built during M3.6D, but a clean-room, first-time **full business demo** with newly provisioned infrastructure and isolated credentials has not been independently verified. Do not treat local Build success as proof of automatic one-command bootstrap.
 
 ## Prerequisites
 
@@ -1316,7 +1328,7 @@ Replace `demo01` with the **actual group suffix used in the run**. Confirm that 
 
 ### Interrupted replay and bounded snapshot
 
-Snapshots are stored **outside Git** at `%TEMP%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json`, with the original partition `[low, highExclusive)` ranges. For an interrupted run, fix the underlying error, keep the **same** SQL state, group, topic, snapshot and database, then set `AnalyticsReplay:Resume=true`. The replay group Kafka-committed positions are authoritative during resume. Do **not** resume a manifest marked complete; do **not** use a fresh run with the same group; do **not** delete manifests to bypass safeguards. If retention removed a required record, the runner refuses to claim completion.
+After M3.6E1, new snapshots are stored **outside Git** at `%LOCALAPPDATA%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json` on Windows by default (or in the explicitly configured absolute `AnalyticsReplay:SnapshotDirectory`), holding the original partition `[low, highExclusive)` ranges. For an interrupted run, fix the underlying error, keep the **same** SQL state, group, topic, snapshot and database, then set `AnalyticsReplay:Resume=true`. The replay group Kafka-committed positions are authoritative during resume. Do **not** resume a manifest marked complete; do **not** use a fresh run with the same group; do **not** delete manifests to bypass safeguards. If retention removed a required record, the runner refuses to claim completion.
 
 ### Automated tests and final validation
 
@@ -1342,6 +1354,47 @@ dotnet build ConferenceProFlow.slnx --configuration Release
 dotnet test ConferenceProFlow.slnx --configuration Release --no-build --verbosity normal
 ```
 
-The targeted **six Replay Runner integration cases passed locally after a clean rebuild**. The full Analytics/full-solution runs and GitHub CI still need confirmation for the final M3.5 Pull Request. None of these disposable Testcontainers tests should change your local live or replay demonstration databases.
+The targeted **six Replay Runner integration cases passed locally after a clean rebuild**. Full Analytics/full-solution local regression and GitHub CI for M3.5 subsequently passed, and the PR was merged. None of these disposable Testcontainers tests should change your local live or replay demonstration databases.
 
 **Scope limits:** single local replay runner, local file manifest, bounded retention, fixed per-partition snapshot, no resetting of live offsets, no historical reconstruction outside retained Kafka data, and no production-grade multi-node coordination or HA. The SQL/Kafka commit boundary remains at least once and replay uses the existing idempotent SQL handler.
+
+---
+## M3.6 — Enterprise Audit, Configuration Hygiene and Targeted Hardening
+
+**Verification status (25 November 2026):** Configuration/secret handling, Docker Compose validation and a clean GitHub clone/Restore/Build were checked locally. Targeted M3.6E1 replay snapshot tests, all six replay integration tests, M3.6E2 alert policy unit tests and all four Kafka publisher integration tests passed locally. The final solution Release build and full regression suite passed locally. The **M3.6 GitHub Pull Request and CI check remain pending** at this documentation checkpoint.
+
+### Replay snapshot storage (M3.6E1)
+
+The Replay Runner now uses the current user's **LocalApplicationData** folder as its default manifest location. On Windows:
+
+```text
+%LOCALAPPDATA%\ConferenceProFlow\ReplaySnapshots\<group-hash>.json
+```
+
+You can override it with the optional **absolute** `AnalyticsReplay:SnapshotDirectory` in Analytics Worker User Secrets. An explicit directory must be stable between the interrupted run and `Resume=true`. A relative path is rejected. **Do not** commit manifests or place them in the project directory.
+
+If an *unfinished* M3.5 run used the previous `%TEMP%` location, see [Replay Snapshot Storage](REPLAY_SNAPSHOT_STORAGE.md) before resuming: preserve its original manifest, group ID, Kafka offsets, and Replay database. Completed historical runs do not need migration or cleanup. A persistent local folder does **not** provide cross-machine/high-availability snapshot durability.
+
+### Kafka Analytics Outbox operational visibility (M3.6E2)
+
+The Registration API Kafka publisher retains the existing durable outbox, retry/backoff and broker-ack-before-SQL-state rule. The following additions are **diagnostic only**:
+
+- Failure categories: `PayloadValidation`, `KafkaDelivery` and `Unexpected` (category alone does not prove temporary versus permanent failure).
+- Structured warnings per failure with `MessageId`, `RegistrationId`, attempts and next retry; full event payload is **not** logged.
+- Error-level alert on the configured threshold (default **five** attempts) and every ten subsequent failures. The optional `KafkaAnalyticsPublisher:AlertAfterAttempts` value (range 1–10,000) belongs in **Registration API User Secrets**.
+- Read-only SQL checks in [Kafka Outbox Operational Checks](KAFKA_OUTBOX_OPERATIONAL_CHECKS.sql) and explanation in [Kafka Outbox Operational Visibility](KAFKA_OUTBOX_OPERATIONAL_VISIBILITY.md).
+
+**No** events are discarded, automatically quarantined, or incorrectly marked as published by this change. Error logs are not an external alerting/pager service. The developer reported no currently unpublished Analytics Outbox events in the local M3.6B inspection; this is a point-in-time observation, not a reliability guarantee.
+
+### Final checks (Visual Studio PowerShell, from repository root)
+
+```powershell
+dotnet build ConferenceProFlow.slnx --configuration Release
+```
+
+```powershell
+dotnet test ConferenceProFlow.slnx --configuration Release --no-build --verbosity normal
+```
+
+Docker Desktop must be running for Testcontainers integration suites. See [M3 Milestone Validation](M3_MILESTONE_VALIDATION.md) for evidence boundaries, residual risks and the M3.6 pull-request checklist.
+

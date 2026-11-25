@@ -88,6 +88,41 @@ public sealed class KafkaReplaySnapshotTests
         Assert.True(config.EnablePartitionEof ?? false);
     }
 
+    [Fact]
+    public void ManifestPath_DefaultsToPersistentLocalApplicationData()
+    {
+        var group = AnalyticsReplayOptions.ReplayGroupPrefix + Guid.NewGuid().ToString("N");
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        Assert.False(string.IsNullOrWhiteSpace(local));
+        var directory = Path.Combine(local, "ConferenceProFlow", "ReplaySnapshots");
+        var path = KafkaAnalyticsReplayRunner.GetManifestPath(group);
+        Assert.Equal(path, KafkaAnalyticsReplayRunner.GetManifestPath(group));
+        Assert.Equal(directory, Path.GetDirectoryName(path));
+        Assert.EndsWith(".json", path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ManifestPath_CustomAbsoluteDirectory_IsUsedWithoutCreatingFiles()
+    {
+        var directory = Path.Combine(Path.GetTempPath(),
+            "ConferenceProFlow-M36E1-" + Guid.NewGuid().ToString("N"));
+        var group = AnalyticsReplayOptions.ReplayGroupPrefix + Guid.NewGuid().ToString("N");
+        var path = KafkaAnalyticsReplayRunner.GetManifestPath(group, directory);
+        Assert.Equal(directory, Path.GetDirectoryName(path));
+        Assert.False(Directory.Exists(directory));
+    }
+
+    [Theory]
+    [InlineData("relative-snapshots")]
+    [InlineData("./relative-snapshots")]
+    public void ManifestPath_RejectsRelativeOverride(string directory)
+    {
+        var group = AnalyticsReplayOptions.ReplayGroupPrefix + "unit-test";
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            KafkaAnalyticsReplayRunner.GetManifestPath(group, directory));
+        Assert.True(error.Message.Contains("absolute", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static ReplaySnapshot NewSnapshot() => new()
     {
         BootstrapServers = "127.0.0.1:9092",

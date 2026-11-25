@@ -1,6 +1,6 @@
 # Kafka Replay — M3.5E Integration Test Coverage
 
-**Status:** Six Kafka + SQL Server Replay Runner integration test cases passed locally on 24 November 2026 after a clean Release rebuild; full Analytics and solution regression passed locally on 24 November 2026; GitHub CI pending.
+**Status:** Six Kafka + SQL Server Replay Runner integration cases passed locally on 24 November 2026; M3.5 full regression and GitHub CI subsequently passed/merged. M3.6E1 snapshot-location modification and six-runner regression passed locally on 25 November 2026; M3.6 CI pending.
 
 ## Goal
 
@@ -67,5 +67,7 @@ If any case fails, keep the original output and report the **test name, first ex
 
 - Testcontainers require Docker Desktop; images can take time to download on the first run.
 - Tests may need extra time on a loaded CI runner; do not confuse broker startup delays with business processing errors.
-- Local snapshots use the OS temporary folder and a hash derived from the replay group. Test groups are random and distinct from the M3.5D group.
+- Since M3.6E1, the runner resolves local snapshots under per-user LocalApplicationData by default (or an absolute override) and still uses a hash derived from each replay group. Test groups are random and distinct from the M3.5D demo group; test cleanup must target only their own manifests.
 - The production-aware design does **not** imply production multi-node coordination, unlimited Kafka retention or cross-system exactly-once guarantees.
+
+**M3.6E1 follow-up:** Added path-resolution tests (default per-user directory, absolute override and invalid relative paths) and reran the six Kafka Replay Runner integration cases successfully. No SQL migration or change to the M3.5E fault-injection/resume assertions was needed.
