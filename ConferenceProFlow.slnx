@@ -2,8 +2,14 @@
   <Folder Name="/Solution Items/">
     <File Path="docs/ANALYTICS_WORKER.md" />
     <File Path="docs/ARCHITECTURE.md" />
+    <File Path="docs/CONFIGURATION_SECURITY_REVIEW.md" />
+    <File Path="docs/ENTERPRISE_INTEGRATION_REVIEW.md" />
+    <File Path="docs/ENTERPRISE_RESILIENCE_CHECKS.sql" />
+    <File Path="docs/ENTERPRISE_RESILIENCE_REVIEW.md" />
     <File Path="docs/KAFKA_ANALYTICS_DESIGN.md" />
     <File Path="docs/KAFKA_LOCAL_DEVELOPMENT.md" />
+    <File Path="docs/KAFKA_OUTBOX_OPERATIONAL_CHECKS.sql" />
+    <File Path="docs/KAFKA_OUTBOX_OPERATIONAL_VISIBILITY.md" />
     <File Path="docs/KAFKA_PUBLISHING.md" />
     <File Path="docs/KAFKA_REPLAY_COMPARISON.sql" />
     <File Path="docs/KAFKA_REPLAY_DESIGN.md" />
@@ -12,8 +18,11 @@
     <File Path="docs/KAFKA_REPLAY_RUNNER.md" />
     <File Path="docs/KAFKA_REPLAY_SETUP.md" />
     <File Path="docs/LOCAL_DEVELOPMENT.md" />
+    <File Path="docs/LOCAL_REPRODUCIBILITY_REVIEW.md" />
+    <File Path="docs/M3_MILESTONE_VALIDATION.md" />
     <File Path="docs/MESSAGING_DESIGN.md" />
     <File Path="docs/PROJECT_CHARTER.md" />
+    <File Path="docs/REPLAY_SNAPSHOT_STORAGE.md" />
     <File Path="LICENSE.txt" />
     <File Path="README.md" />
   </Folder>
