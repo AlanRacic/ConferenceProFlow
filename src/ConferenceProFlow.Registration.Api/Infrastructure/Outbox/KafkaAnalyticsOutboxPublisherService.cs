@@ -130,6 +130,7 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
         // There must not be a fresh RegistrationFinalizedV1.Create() call here.
         // Failure category is for observability ONLY: no automatic discard or quarantine.
         var payloadValidated = false;
+        var publishStopwatch = Stopwatch.StartNew();
         try
         {
             if (outbox.MessageType != RegistrationFinalizedV1.EventType)
@@ -175,6 +176,8 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
                 AnalyticsOutboxPublishAlertPolicy.Describe(kind, ex),
                 TimeSpan.FromSeconds(retrySeconds));
             await db.SaveChangesAsync(cancellationToken);
+            // Count only a retry state that was successfully persisted in SQL.
+            RegistrationOutboxPublishMetrics.RecordRetryScheduled(publishStopwatch.Elapsed);
             if (AnalyticsOutboxPublishAlertPolicy.ShouldEscalate(
                     outbox.PublishAttempts, _alertAfterAttempts))
             {
@@ -210,6 +213,8 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
             throw;
         }
 
+        // A broker acknowledgement alone is not a durable published transition.
+        RegistrationOutboxPublishMetrics.RecordPublished(publishStopwatch.Elapsed);
         _logger.LogInformation("Kafka Analytics event {MessageId} published to {Topic}", outbox.Id, _topic);
     }
 

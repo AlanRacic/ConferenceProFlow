@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using RabbitMQ.Client;
@@ -12,7 +12,6 @@ public sealed class OutboxPublisherService : BackgroundService
     private static readonly TimeSpan PollingInterval = TimeSpan.FromSeconds(5);
 
     private readonly TimeSpan _publishTimeout;
-
     private const int BatchSize = 20;
 
     private readonly IServiceScopeFactory _scopeFactory;
@@ -21,7 +20,6 @@ public sealed class OutboxPublisherService : BackgroundService
 
     private IConnection? _connection;
     private IChannel? _channel;
-
     public OutboxPublisherService(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
@@ -31,14 +29,12 @@ public sealed class OutboxPublisherService : BackgroundService
         _logger = logger;
 
         var publishTimeoutSeconds = configuration.GetValue<int?>("OutboxPublisher:PublishTimeoutSeconds") ?? 15;
-
         if (publishTimeoutSeconds < 1 || publishTimeoutSeconds > 120)
         {
             throw new InvalidOperationException("OutboxPublisher:PublishTimeoutSeconds must be between 1 and 120.");
         }
 
         _publishTimeout = TimeSpan.FromSeconds(publishTimeoutSeconds);
-
         _connectionFactory = new ConnectionFactory
         {
             HostName = Required(configuration, "RabbitMq:HostName"),
@@ -48,7 +44,6 @@ public sealed class OutboxPublisherService : BackgroundService
             Password = Required(configuration, "RabbitMq:Password"),
 
             ClientProvidedName = "ConferenceProFlow.Registration.OutboxPublisher",
-
             AutomaticRecoveryEnabled = false
         };
     }
@@ -56,7 +51,6 @@ public sealed class OutboxPublisherService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Outbox Publisher started.");
-
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -73,7 +67,6 @@ public sealed class OutboxPublisherService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Outbox publishing cycle failed.");
-
                     await ResetRabbitMqAsync();
                 }
 
@@ -91,7 +84,6 @@ public sealed class OutboxPublisherService : BackgroundService
         finally
         {
             await ResetRabbitMqAsync();
-
             _logger.LogInformation("Outbox Publisher stopped.");
         }
     }
@@ -103,7 +95,6 @@ public sealed class OutboxPublisherService : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<RegistrationDbContext>();
 
         var utcNow = DateTimeOffset.UtcNow;
-
         var messages = await db.OutboxMessages
             .Where(x =>
                 x.PublishedAtUtc == null &&
@@ -119,9 +110,9 @@ public sealed class OutboxPublisherService : BackgroundService
         {
             return;
         }
-
         foreach (var message in messages)
         {
+            var publishStopwatch = Stopwatch.StartNew();
             // Validate known message contracts before contacting RabbitMQ.
             var permanentError = OutboxPayloadValidator.GetPermanentError(message);
 
@@ -130,7 +121,7 @@ public sealed class OutboxPublisherService : BackgroundService
                 message.Quarantine(permanentError, DateTimeOffset.UtcNow);
 
                 await db.SaveChangesAsync(cancellationToken);
-
+                RegistrationOutboxPublishMetrics.RecordRabbitMqQuarantined(publishStopwatch.Elapsed);
                 _logger.LogError(
                     "Outbox message {MessageId} was quarantined. Reason: {Reason}",
                     message.Id,
@@ -143,7 +134,6 @@ public sealed class OutboxPublisherService : BackgroundService
             using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
             attemptCts.CancelAfter(_publishTimeout);
-
             try
             {
                 await EnsureRabbitMqConnectionAsync(attemptCts.Token);
@@ -153,7 +143,6 @@ public sealed class OutboxPublisherService : BackgroundService
 
                 // Restore the original HTTP trace context persisted in the Outbox.
                 ActivityContext? originalContext = null;
-
                 if (message.TraceParent is not null &&
                     ActivityContext.TryParse(
                         message.TraceParent,
@@ -162,7 +151,6 @@ public sealed class OutboxPublisherService : BackgroundService
                 {
                     originalContext = parsedContext;
                 }
-
                 // The publisher runs asynchronously, potentially long after the originating HTTP request has completed.
                 using var publishActivity = RegistrationTelemetry.Source.StartActivity(
                     "rabbitmq.registration-request.publish",
@@ -171,13 +159,11 @@ public sealed class OutboxPublisherService : BackgroundService
                     links: originalContext is { } context
                         ? new[] { new ActivityLink(context) }
                         : null);
-
                 publishActivity?.SetTag("messaging.system", "rabbitmq");
                 publishActivity?.SetTag("messaging.operation.name", "send");
                 publishActivity?.SetTag(
                     "messaging.destination.name",
                     MessagingTopology.ExchangeName);
-
                 var properties = new BasicProperties
                 {
                     MessageId = message.Id.ToString("D"),
@@ -185,7 +171,6 @@ public sealed class OutboxPublisherService : BackgroundService
                     Type = message.MessageType,
                     Persistent = true
                 };
-
                 // Prefer the current producer span context.
                 // If tracing is disabled, preserve the persisted Outbox context.
                 var headerTraceParent = publishActivity?.Id ?? message.TraceParent;
@@ -193,7 +178,6 @@ public sealed class OutboxPublisherService : BackgroundService
                 var headerTraceState = publishActivity is not null
                     ? publishActivity.TraceStateString
                     : message.TraceState;
-
                 // Add W3C trace headers without changing the business payload.
                 if (headerTraceParent is not null &&
                     ActivityContext.TryParse(
@@ -205,7 +189,6 @@ public sealed class OutboxPublisherService : BackgroundService
                     {
                         ["traceparent"] = Encoding.ASCII.GetBytes(headerTraceParent)
                     };
-
                     if (!string.IsNullOrEmpty(headerTraceState))
                     {
                         properties.Headers["tracestate"] = Encoding.ASCII.GetBytes(headerTraceState);
@@ -213,7 +196,6 @@ public sealed class OutboxPublisherService : BackgroundService
                 }
 
                 var body = Encoding.UTF8.GetBytes(message.Payload);
-
                 // Publisher confirmation is awaited with a bounded token.
                 try
                 {
@@ -230,7 +212,6 @@ public sealed class OutboxPublisherService : BackgroundService
                     publishActivity?.SetStatus(
                         ActivityStatusCode.Error,
                         ex.GetType().Name);
-
                     throw;
                 }
             }
@@ -251,10 +232,10 @@ public sealed class OutboxPublisherService : BackgroundService
                         : string.IsNullOrWhiteSpace(ex.Message)
                             ? ex.GetType().Name
                             : ex.Message;
-
                 message.RecordFailure(error, DateTimeOffset.UtcNow);
 
                 await db.SaveChangesAsync(cancellationToken);
+                RegistrationOutboxPublishMetrics.RecordRabbitMqRetryScheduled(publishStopwatch.Elapsed);
 
                 _logger.LogWarning(
                     ex,
@@ -263,7 +244,6 @@ public sealed class OutboxPublisherService : BackgroundService
                     message.Id,
                     message.PublishAttempts,
                     message.NextAttemptAtUtc);
-
                 await ResetRabbitMqAsync();
 
                 continue;
@@ -273,11 +253,11 @@ public sealed class OutboxPublisherService : BackgroundService
             message.MarkPublished(DateTimeOffset.UtcNow);
 
             await db.SaveChangesAsync(cancellationToken);
+            RegistrationOutboxPublishMetrics.RecordRabbitMqPublished(publishStopwatch.Elapsed);
 
             _logger.LogInformation("Published Outbox message {MessageId}.", message.Id);
         }
     }
-
     private async Task EnsureRabbitMqConnectionAsync(CancellationToken cancellationToken)
     {
         if (_connection?.IsOpen == true && _channel?.IsOpen == true)
@@ -292,7 +272,6 @@ public sealed class OutboxPublisherService : BackgroundService
         var channelOptions = new CreateChannelOptions(
             publisherConfirmationsEnabled: true,
             publisherConfirmationTrackingEnabled: true);
-
         _channel = await _connection.CreateChannelAsync(
             channelOptions,
             cancellationToken);
@@ -303,14 +282,12 @@ public sealed class OutboxPublisherService : BackgroundService
             durable: true,
             autoDelete: false,
             cancellationToken: cancellationToken);
-
         await _channel.QueueDeclareAsync(
             queue: MessagingTopology.RegistrationRequestsQueue,
             durable: true,
             exclusive: false,
             autoDelete: false,
             cancellationToken: cancellationToken);
-
         await _channel.QueueBindAsync(
             queue: MessagingTopology.RegistrationRequestsQueue,
             exchange: MessagingTopology.ExchangeName,
@@ -319,7 +296,6 @@ public sealed class OutboxPublisherService : BackgroundService
 
         _logger.LogInformation("RabbitMQ connection and messaging topology initialized.");
     }
-
     private async Task ResetRabbitMqAsync()
     {
         if (_channel is not null)
@@ -337,7 +313,6 @@ public sealed class OutboxPublisherService : BackgroundService
                 _channel = null;
             }
         }
-
         if (_connection is not null)
         {
             try
@@ -358,7 +333,6 @@ public sealed class OutboxPublisherService : BackgroundService
     private static string Required(IConfiguration configuration, string key)
     {
         var value = configuration[key];
-
         return !string.IsNullOrWhiteSpace(value)
             ? value
             : throw new InvalidOperationException($"Required configuration '{key}' is missing.");

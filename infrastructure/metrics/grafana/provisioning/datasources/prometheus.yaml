@@ -1,0 +1,14 @@
+apiVersion: 1
+
+# Grafana runs INSIDE Compose; 'localhost' here is Grafana itself, not Prometheus.
+datasources:
+  - name: Prometheus
+    uid: conferenceproflow-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s

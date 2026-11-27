@@ -1,0 +1,50 @@
+@prometheusBaseUrl = http://127.0.0.1:9090
+
+# ConferenceProFlow M4.3D2 — READ ONLY Prometheus HTTP API probes.
+# Open from Visual Studio; use Send Request on individual GET queries.
+# Most custom metrics appear only AFTER apps start, process events and OTLP export runs.
+# Default name translation: dots -> underscores; Counter -> _total; seconds histograms -> _seconds_count.
+# Do not paste Prometheus API JSON that contains sensitive labels or connection details.
+
+### 00 — Prometheus self-scrape (backend health only)
+GET {{prometheusBaseUrl}}/api/v1/query?query=up%7Bjob%3D%22prometheus%22%7D
+
+### 01 — Registration HTTP duration count
+GET {{prometheusBaseUrl}}/api/v1/query?query=http_server_request_duration_seconds_count
+
+### 02 — Resource service metadata (after application export)
+GET {{prometheusBaseUrl}}/api/v1/query?query=target_info
+
+### 03 — Outbox backlog snapshot: three pipelines
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_outbox_backlog_pending
+
+### 04 — Oldest pending message age
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_outbox_backlog_oldest_age_seconds
+
+### 05 — Finalized registrations by outcome
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_registration_finalized_total
+
+### 06 — Outbox publishing outcomes
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_outbox_publish_outcomes_total
+
+### 07 — Allocation Inbox processing attempts
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_allocation_inbox_processing_attempts_total
+
+### 08 — Analytics Kafka processing attempts
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_analytics_kafka_handling_attempts_total
+
+### 09 — Analytics Kafka offset commits
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_analytics_kafka_offset_commit_attempts_total
+
+### 10 — Registration finalization histogram count
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_registration_finalization_duration_seconds_count
+
+### 11 — Outbox publish duration histogram count
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_outbox_publish_duration_seconds_count
+
+### 12 — Allocation Inbox duration histogram count
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_allocation_inbox_processing_duration_seconds_count
+
+### 13 — Analytics Kafka duration histogram count
+GET {{prometheusBaseUrl}}/api/v1/query?query=conferenceproflow_analytics_kafka_handling_duration_seconds_count
+

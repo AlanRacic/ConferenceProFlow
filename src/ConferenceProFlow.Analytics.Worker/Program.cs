@@ -9,7 +9,6 @@ using Microsoft.Extensions.DependencyInjection;
 using ConferenceProFlow.Analytics.Worker.Observability;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
-
 var builder = Host.CreateApplicationBuilder(args);
 
 // M4.2B - OpenTelemetry tracing foundation
@@ -18,7 +17,6 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(tracing =>
     {
         tracing.AddSource(AnalyticsTelemetry.SourceName);
-
         if (builder.Environment.IsDevelopment() &&
             builder.Configuration.GetValue<bool>("Observability:ConsoleExporter:Enabled"))
         {
@@ -30,13 +28,11 @@ var replayEnabled = builder.Configuration.GetValue<bool>("AnalyticsReplay:Enable
 var liveConsumerEnabled = builder.Configuration.GetValue<bool>("AnalyticsKafkaConsumer:Enabled");
 var liveConnection = builder.Configuration.GetConnectionString("AnalyticsDb");
 string selectedConnection;
-
 if (replayEnabled)
 {
     var replay = builder.Configuration.GetSection(AnalyticsReplayOptions.SectionName)
         .Get<AnalyticsReplayOptions>() ?? new AnalyticsReplayOptions();
     var replayConnection = builder.Configuration.GetConnectionString("AnalyticsReplayDb");
-
     // Must happen before DbContext/consumer creation. No live SQL writes or
     // live-group offset resets are possible from the replay path.
     AnalyticsReplaySafety.ValidateOrThrow(
@@ -53,13 +49,11 @@ else
     if (string.IsNullOrWhiteSpace(selectedConnection))
         throw new InvalidOperationException("ConnectionStrings:AnalyticsDb is empty.");
 }
-
 builder.Services.AddDbContext<AnalyticsDbContext>(options =>
     options.UseSqlServer(selectedConnection));
 builder.Services.AddScoped<AnalyticsEventProcessingService>();
 builder.Services.AddScoped<AnalyticsQuarantineService>();
 builder.Services.AddScoped<KafkaAnalyticsRecordHandler>();
-
 if (!replayEnabled)
 {
     builder.Services
@@ -71,7 +65,6 @@ if (!replayEnabled)
             "durable processing requires ObserveOnly=false and a non-preview GroupId. " +
             "BootstrapServers, Topic and GroupId must be nonempty.")
         .ValidateOnStart();
-
     if (!liveConsumerEnabled)
         builder.Services.AddHostedService<AnalyticsWorkerBackgroundService>();
     else if (builder.Configuration.GetValue<bool>("AnalyticsKafkaConsumer:ObserveOnly", true))
@@ -79,8 +72,12 @@ if (!replayEnabled)
     else
         builder.Services.AddHostedService<KafkaAnalyticsConsumerService>();
 }
-
 ConferenceProFlow.Analytics.Worker.Observability.JaegerOtlpExporterRegistration.Configure(
+    builder.Services, builder.Configuration, builder.Environment);
+
+// M4.3C2 - opt-in metrics for the durable live Kafka consumer.
+// This neither changes replay behavior nor the existing Jaeger trace exporter.
+AnalyticsMetricsConfiguration.Configure(
     builder.Services, builder.Configuration, builder.Environment);
 
 using var host = builder.Build();

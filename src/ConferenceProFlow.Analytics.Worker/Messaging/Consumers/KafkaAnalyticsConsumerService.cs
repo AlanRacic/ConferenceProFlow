@@ -80,18 +80,50 @@ public sealed class KafkaAnalyticsConsumerService(
                             // services. SQL errors propagate rather than being treated
                             // as malformed Kafka payloads.
                             KafkaAnalyticsRecordDisposition disposition;
-                            await using (var scope = scopeFactory.CreateAsyncScope())
+                            var handlingStopwatch = Stopwatch.StartNew();
+                            try
                             {
-                                var handler = scope.ServiceProvider
-                                    .GetRequiredService<KafkaAnalyticsRecordHandler>();
-                                disposition = await handler.HandleAsync(record, stoppingToken);
+                                await using (var scope = scopeFactory.CreateAsyncScope())
+                                {
+                                    var handler = scope.ServiceProvider
+                                        .GetRequiredService<KafkaAnalyticsRecordHandler>();
+                                    disposition = await handler.HandleAsync(record, stoppingToken);
+                                }
+                            }
+                            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                            {
+                                // Normal shutdown is not counted as a failed processing attempt.
+                                throw;
+                            }
+                            catch (Exception)
+                            {
+                                AnalyticsKafkaConsumerMetrics.RecordHandlingFailure(handlingStopwatch.Elapsed);
+                                throw; // SQL errors retain existing restart/replay semantics.
                             }
 
-                            // No code path reaches here without a committed SQL
-                            // processing transaction, a recognized durable duplicate,
-                            // or a committed quarantine insert.
+                            // Handler returned only after durable SQL handling, recognized
+                            // duplicate, or committed quarantine. Kafka may replay the record
+                            // if the subsequent offset commit fails: this is an ATTEMPT metric.
+                            AnalyticsKafkaConsumerMetrics.RecordHandled(
+                                disposition, handlingStopwatch.Elapsed);
+
                             // Commit(record) acknowledges the NEXT offset in its partition.
-                            consumer.Commit(record);
+                            // Track commit attempts separately so they cannot be confused
+                            // with SQL handling or unique business events.
+                            try
+                            {
+                                consumer.Commit(record);
+                                AnalyticsKafkaConsumerMetrics.RecordOffsetCommitSuccess();
+                            }
+                            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch (Exception)
+                            {
+                                AnalyticsKafkaConsumerMetrics.RecordOffsetCommitFailure();
+                                throw; // Keep existing consumer-session restart semantics.
+                            }
 
                             activity?.SetTag(
                                 "conferenceproflow.analytics.disposition",

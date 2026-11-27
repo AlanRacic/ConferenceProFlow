@@ -1,0 +1,43 @@
+# M4.3D1 - optional, local-only metrics backend.
+# Intentionally separate from the main application stack and Jaeger.
+# Run from repository root: docker compose -f infrastructure/compose.metrics.yaml up -d
+name: conferenceproflow-metrics
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-otlp-receiver
+    ports:
+      # Prometheus UI, query API, and OTLP/HTTP ingestion are on the SAME port.
+      # The receiver has no authentication; expose ONLY to localhost.
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./metrics/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: "no"
+
+  grafana:
+    image: grafana/grafana:12.4.16
+    depends_on:
+      - prometheus
+    ports:
+      # Grafana local UI; initial admin credentials are explained in docs.
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./metrics/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./metrics/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: "no"
+
+volumes:
+  prometheus-data:
+  grafana-data:

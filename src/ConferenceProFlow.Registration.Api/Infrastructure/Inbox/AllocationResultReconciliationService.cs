@@ -6,7 +6,6 @@ using ConferenceProFlow.Registration.Api.Observability;
 using Microsoft.EntityFrameworkCore;
 
 namespace ConferenceProFlow.Registration.Api.Infrastructure.Inbox;
-
 /// <summary>
 /// Atomically records a result receipt and reconciles the Registration status.
 /// The RabbitMQ consumer (M2.6D2) will ACK only after this method returns.
@@ -17,7 +16,6 @@ public sealed class AllocationResultReconciliationService
     private readonly RegistrationDbContext _db;
 
     public AllocationResultReconciliationService(RegistrationDbContext db) => _db = db;
-
     public async Task<AllocationResultReconciliationResult> ApplyAsync(
         AllocationDecidedV1 result,
         CancellationToken cancellationToken = default)
@@ -25,7 +23,6 @@ public sealed class AllocationResultReconciliationService
         var error = AllocationDecidedV1Validator.GetError(result);
         if (error is not null)
             throw new ArgumentException(error, nameof(result));
-
         for (var attempt = 1; attempt <= MaxUniqueConflictAttempts; attempt++)
         {
             try
@@ -42,10 +39,8 @@ public sealed class AllocationResultReconciliationService
                     throw;
             }
         }
-
         throw new InvalidOperationException("Unexpected reconciliation retry state.");
     }
-
     private async Task<AllocationResultReconciliationResult> ApplyOnceAsync(
         AllocationDecidedV1 result,
         CancellationToken cancellationToken)
@@ -58,7 +53,6 @@ public sealed class AllocationResultReconciliationService
             return existingMessage.Matches(result)
                 ? AllocationResultReconciliationResult.DuplicateMessage
                 : AllocationResultReconciliationResult.Conflict;
-
         // One logical Allocation decision is allowed per RegistrationId.
         // Duplicate business decisions are safe even if a different MessageId was used;
         // mismatched allocation IDs or outcomes are conflicts.
@@ -74,7 +68,6 @@ public sealed class AllocationResultReconciliationService
                 ? AllocationResultReconciliationResult.DuplicateDecision
                 : AllocationResultReconciliationResult.Conflict;
         }
-
         var registration = await _db.Registrations
             .SingleOrDefaultAsync(x => x.Id == result.RegistrationId, cancellationToken);
         if (registration is null)
@@ -82,7 +75,6 @@ public sealed class AllocationResultReconciliationService
 
         if (registration.SessionId != result.SessionId)
             return AllocationResultReconciliationResult.Conflict;
-
         var updatedAtUtc = DateTimeOffset.UtcNow;
         if (updatedAtUtc < registration.CreatedAtUtc)
             updatedAtUtc = registration.CreatedAtUtc;
@@ -90,7 +82,6 @@ public sealed class AllocationResultReconciliationService
         // Only an actual Pending -> final transition produces an analytics event.
         // Repeated or pre-finalized decisions must never generate a second event.
         var isNewFinalization = registration.Status == RegistrationStatus.Pending;
-
         if (result.Status == AllocationDecidedV1.ConfirmedStatus)
         {
             if (registration.Status == RegistrationStatus.Rejected)
@@ -110,10 +101,8 @@ public sealed class AllocationResultReconciliationService
             if (registration.Status == RegistrationStatus.Pending)
                 registration.Reject(reason, updatedAtUtc);
         }
-
         _db.AllocationResultInboxMessages.Add(
             AllocationResultInboxMessage.Create(result, DateTimeOffset.UtcNow));
-
         if (isNewFinalization)
         {
             // The actual committed Registration status is the analytics source of truth.
@@ -123,7 +112,6 @@ public sealed class AllocationResultReconciliationService
                 : RegistrationFinalizedV1.RejectedStatus;
             var analyticsEvent = RegistrationFinalizedV1.Create(
                 registration.Id, registration.SessionId, finalStatus, updatedAtUtc);
-
             // Capture the current RabbitMQ consumer span before SaveChanges.
             // This is durable across Kafka-publisher restarts and replay attempts.
             // If tracing is unavailable, the business transaction still succeeds.
@@ -132,10 +120,16 @@ public sealed class AllocationResultReconciliationService
                 AnalyticsOutboxMessage.FromEvent(
                     analyticsEvent, trace.TraceParent, trace.TraceState));
         }
-
         // EF Core relational SaveChanges is atomic: status, result Inbox and
         // Analytics Outbox succeed or roll back together. No Kafka call here.
         await _db.SaveChangesAsync(cancellationToken);
+
+        // M4.3A1 - record only real, committed Pending -> final transitions.
+        // Duplicate receipts, conflicts and failed SQL commits emit no finalization metrics.
+        if (isNewFinalization)
+            RegistrationMetrics.RecordFinalized(
+                registration.Status, registration.CreatedAtUtc, registration.UpdatedAtUtc);
+
         return AllocationResultReconciliationResult.Applied;
     }
 }

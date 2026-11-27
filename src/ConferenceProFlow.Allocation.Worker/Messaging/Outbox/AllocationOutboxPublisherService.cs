@@ -101,11 +101,13 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
 
         foreach (var message in messages)
         {
+            var publishStopwatch = Stopwatch.StartNew();
             var permanentError = AllocationOutboxPayloadValidator.GetPermanentError(message);
             if (permanentError is not null)
             {
                 message.Quarantine(permanentError, DateTimeOffset.UtcNow);
                 await db.SaveChangesAsync(cancellationToken);
+                AllocationOutboxPublishMetrics.RecordQuarantined(publishStopwatch.Elapsed);
                 _logger.LogError(
                     "Quarantined allocation result {MessageId}: {Reason}",
                     message.Id, permanentError);
@@ -166,6 +168,7 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
                     : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
                 message.RecordFailure(error, DateTimeOffset.UtcNow);
                 await db.SaveChangesAsync(cancellationToken);
+                AllocationOutboxPublishMetrics.RecordRetryScheduled(publishStopwatch.Elapsed);
                 _logger.LogWarning(ex,
                     "Allocation result {MessageId} failed to publish. Attempt {Attempts}, next retry {RetryAt}.",
                     message.Id, message.PublishAttempts, message.NextAttemptAtUtc);
@@ -178,6 +181,7 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
             // At-least-once redelivery is intentional; M2.6D deduplicates.
             message.MarkPublished(DateTimeOffset.UtcNow);
             await db.SaveChangesAsync(cancellationToken);
+            AllocationOutboxPublishMetrics.RecordPublished(publishStopwatch.Elapsed);
             _logger.LogInformation("Published allocation result {MessageId}.", message.Id);
         }
     }
