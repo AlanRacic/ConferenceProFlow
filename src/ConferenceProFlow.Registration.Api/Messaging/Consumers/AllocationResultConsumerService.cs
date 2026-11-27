@@ -1,7 +1,8 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using ConferenceProFlow.Registration.Api.Infrastructure.Inbox;
 using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using ConferenceProFlow.Registration.Api.Messaging.Contracts;
+using ConferenceProFlow.Registration.Api.Observability;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -16,7 +17,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ParkingPublishTimeout = TimeSpan.FromSeconds(15);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AllocationResultConsumerService> _logger;
     private readonly ConnectionFactory _connectionFactory;
@@ -28,7 +28,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
-
         _connectionFactory = new ConnectionFactory
         {
             HostName = Required(configuration, "RabbitMq:HostName"),
@@ -47,7 +46,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Allocation Result Consumer started.");
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -62,7 +60,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
             {
                 _logger.LogError(ex, "Allocation Result Consumer session failed. Reconnecting.");
             }
-
             try
             {
                 await Task.Delay(ReconnectDelay, stoppingToken);
@@ -80,21 +77,18 @@ public sealed class AllocationResultConsumerService : BackgroundService
     {
         await using var connection = await _connectionFactory.CreateConnectionAsync(stoppingToken);
         await using var consumerChannel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
-
         // Publishing to the parking queue requires broker confirmations.
         var confirmOptions = new CreateChannelOptions(
             publisherConfirmationsEnabled: true,
             publisherConfirmationTrackingEnabled: true);
 
         await using var parkingChannel = await connection.CreateChannelAsync(confirmOptions, stoppingToken);
-
         await consumerChannel.ExchangeDeclareAsync(
             exchange: MessagingTopology.ExchangeName,
             type: ExchangeType.Topic,
             durable: true,
             autoDelete: false,
             cancellationToken: stoppingToken);
-
         // The Registration service owns this result queue and its binding.
         await consumerChannel.QueueDeclareAsync(
             queue: MessagingTopology.RegistrationAllocationResultsQueue,
@@ -102,20 +96,17 @@ public sealed class AllocationResultConsumerService : BackgroundService
             exclusive: false,
             autoDelete: false,
             cancellationToken: stoppingToken);
-
         await consumerChannel.QueueBindAsync(
             queue: MessagingTopology.RegistrationAllocationResultsQueue,
             exchange: MessagingTopology.ExchangeName,
             routingKey: MessagingTopology.AllocationDecidedRoutingKey,
             cancellationToken: stoppingToken);
-
         await parkingChannel.QueueDeclareAsync(
             queue: MessagingTopology.FailedAllocationResultsQueue,
             durable: true,
             exclusive: false,
             autoDelete: false,
             cancellationToken: stoppingToken);
-
         // Serial delivery per consumer; SQL constraints still enforce cross-instance safety.
         await consumerChannel.BasicQosAsync(
             prefetchSize: 0,
@@ -124,7 +115,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
             cancellationToken: stoppingToken);
 
         var restartSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
         connection.ConnectionShutdownAsync += (_, _) =>
         {
             restartSignal.TrySetResult();
@@ -140,7 +130,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
             restartSignal.TrySetResult();
             return Task.CompletedTask;
         };
-
         var consumer = new AsyncEventingBasicConsumer(consumerChannel);
         consumer.ReceivedAsync += async (_, delivery) =>
         {
@@ -158,7 +147,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
                 restartSignal.TrySetResult();
             }
         };
-
         var consumerTag = await consumerChannel.BasicConsumeAsync(
             queue: MessagingTopology.RegistrationAllocationResultsQueue,
             autoAck: false,
@@ -176,6 +164,11 @@ public sealed class AllocationResultConsumerService : BackgroundService
         IChannel parkingChannel,
         CancellationToken cancellationToken)
     {
+        // M4.2C7: extract the upstream Allocation Result producer context.
+        // Invalid or missing telemetry never changes reconciliation or ACK rules.
+        using var activity = AllocationResultConsumerTelemetry.StartProcessingActivity(
+            delivery.BasicProperties.Headers);
+
         if (delivery.RoutingKey != MessagingTopology.AllocationDecidedRoutingKey ||
             delivery.BasicProperties.Type != AllocationDecidedV1.MessageType ||
             delivery.BasicProperties.ContentType != "application/json")
@@ -185,7 +178,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
                 "Unexpected routing key, message type, or content type.", cancellationToken);
             return;
         }
-
         AllocationDecidedV1? result;
         try
         {
@@ -198,7 +190,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
                 $"Invalid JSON payload: {ex.GetType().Name}", cancellationToken);
             return;
         }
-
         if (result is null)
         {
             await ParkAndAcknowledgeAsync(
@@ -206,7 +197,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
                 "JSON payload is null.", cancellationToken);
             return;
         }
-
         var validationError = AllocationDecidedV1Validator.GetError(result);
         if (validationError is not null)
         {
@@ -214,7 +204,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
                 delivery, consumerChannel, parkingChannel, validationError, cancellationToken);
             return;
         }
-
         if (!Guid.TryParse(delivery.BasicProperties.MessageId, out var headerMessageId) ||
             headerMessageId != result.MessageId)
         {
@@ -223,12 +212,12 @@ public sealed class AllocationResultConsumerService : BackgroundService
                 "AMQP MessageId does not match the JSON payload.", cancellationToken);
             return;
         }
-
         // Each delivery has a fresh scoped DbContext.
         using var scope = _scopeFactory.CreateScope();
         var reconciliation = scope.ServiceProvider.GetRequiredService<AllocationResultReconciliationService>();
         var outcome = await reconciliation.ApplyAsync(result, cancellationToken);
-
+        // Bounded diagnostic dimension; never write identifiers or JSON payload to spans.
+        activity?.SetTag("conferenceproflow.reconciliation.outcome", outcome.ToString());
         switch (outcome)
         {
             case AllocationResultReconciliationResult.Applied:
@@ -240,14 +229,12 @@ public sealed class AllocationResultConsumerService : BackgroundService
                     "Allocation result handled. MessageId: {MessageId}, RegistrationId: {RegistrationId}, Outcome: {Outcome}",
                     result.MessageId, result.RegistrationId, outcome);
                 break;
-
             case AllocationResultReconciliationResult.Conflict:
                 await ParkAndAcknowledgeAsync(
                     delivery, consumerChannel, parkingChannel,
                     "Conflicting allocation decision for the message, allocation, session, or registration.",
                     cancellationToken);
                 break;
-
             case AllocationResultReconciliationResult.UnknownRegistration:
                 // With the current transactional Registration Outbox, a result for an unknown Registration should not be a normal ordering race. Park for investigation.
                 await ParkAndAcknowledgeAsync(
@@ -255,7 +242,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
                     "Unknown registration. Investigate before any manual replay.",
                     cancellationToken);
                 break;
-
             default:
                 throw new InvalidOperationException($"Unexpected reconciliation outcome: {outcome}");
         }
@@ -280,10 +266,8 @@ public sealed class AllocationResultConsumerService : BackgroundService
                 ["x-original-routing-key"] = delivery.RoutingKey
             }
         };
-
         using var publishCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         publishCts.CancelAfter(ParkingPublishTimeout);
-
         // The default exchange routes directly to the declared parking queue.
         // Publisher confirms + mandatory prevent acknowledging a message not safely parked.
         await parkingChannel.BasicPublishAsync(
@@ -293,7 +277,6 @@ public sealed class AllocationResultConsumerService : BackgroundService
             basicProperties: properties,
             body: delivery.Body,
             cancellationToken: publishCts.Token);
-
         await consumerChannel.BasicAckAsync(
             delivery.DeliveryTag, multiple: false, cancellationToken: cancellationToken);
 

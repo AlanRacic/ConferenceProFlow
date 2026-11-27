@@ -5,8 +5,25 @@ using ConferenceProFlow.Allocation.Worker.Messaging.Inbox;
 using ConferenceProFlow.Allocation.Worker.Messaging.Outbox;
 using ConferenceProFlow.Allocation.Worker.Processing;
 using Microsoft.EntityFrameworkCore;
+using ConferenceProFlow.Allocation.Worker.Observability;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var builder = Host.CreateApplicationBuilder(args);
+
+// M4.2B - OpenTelemetry tracing foundation
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("conferenceproflow-allocation-worker"))
+    .WithTracing(tracing =>
+    {
+        tracing.AddSource(AllocationTelemetry.SourceName);
+
+        if (builder.Environment.IsDevelopment() &&
+            builder.Configuration.GetValue<bool>("Observability:ConsoleExporter:Enabled"))
+        {
+            tracing.AddConsoleExporter();
+        }
+    });
 
 var connectionString = builder.Configuration.GetConnectionString("AllocationDb")
     ?? throw new InvalidOperationException("Connection string 'AllocationDb' is not configured.");
@@ -37,5 +54,8 @@ if (!rabbitMqConsumerEnabled &&
 {
     builder.Services.AddHostedService<AllocationBackgroundService>();
 }
+
+ConferenceProFlow.Allocation.Worker.Observability.JaegerOtlpExporterRegistration.Configure(
+    builder.Services, builder.Configuration, builder.Environment);
 
 await builder.Build().RunAsync();

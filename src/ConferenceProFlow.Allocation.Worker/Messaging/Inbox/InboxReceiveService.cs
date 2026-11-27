@@ -18,7 +18,9 @@ public sealed class InboxReceiveService
     public async Task<InboxReceiveResult> ReceiveAsync(
         RegistrationRequestedV1 message,
         DateTimeOffset receivedAtUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? traceParent = null,
+        string? traceState = null)
     {
         ArgumentNullException.ThrowIfNull(message);
 
@@ -27,7 +29,9 @@ public sealed class InboxReceiveService
             message.RegistrationId,
             message.SessionId,
             message.OccurredAtUtc,
-            receivedAtUtc);
+            receivedAtUtc,
+            traceParent,
+            traceState);
 
         _db.InboxMessages.Add(inboxMessage);
 

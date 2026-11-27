@@ -211,6 +211,14 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
                     b.Property<Guid>("RegistrationId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("TraceParent")
+                        .HasMaxLength(55)
+                        .HasColumnType("nvarchar(55)");
+
+                    b.Property<string>("TraceState")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("RegistrationId")
@@ -258,6 +266,14 @@ namespace ConferenceProFlow.Registration.Api.Infrastructure.Persistence.Migratio
 
                     b.Property<DateTimeOffset?>("QuarantinedAtUtc")
                         .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("TraceParent")
+                        .HasMaxLength(55)
+                        .HasColumnType("nvarchar(55)");
+
+                    b.Property<string>("TraceState")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
 
                     b.HasKey("Id");
 

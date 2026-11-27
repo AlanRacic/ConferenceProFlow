@@ -1,0 +1,105 @@
+@baseUrl = http://localhost:5048
+
+# ConferenceProFlow — M4.2D3: Jaeger end-to-end demonstration.
+# Local development only; never use real participant personal data.
+# If Registration API listens on a different URL, update ONLY @baseUrl.
+# Execute requests 01 and 02; STOP and provision the new session inventory
+# with docs/OBSERVABILITY_E2E_SEED.sql before executing requests 03-08.
+# Named HTTP responses automatically supply all IDs; do not type GUIDs here.
+# Use a NEW session for every run. Never reset existing data to rerun this demo.
+
+### 01 — Create dedicated observability demonstration conference
+# @name obsCreateConference
+POST {{baseUrl}}/api/conferences
+Content-Type: application/json
+
+{
+  "name": "ConferenceProFlow Observability E2E Demo 2027",
+  "startsAtUtc": "2027-06-01T08:00:00Z",
+  "endsAtUtc": "2027-06-02T18:00:00Z"
+}
+
+### 02 — Create fresh session (COPY its response `id` ONCE into SQL seed/checks)
+# @name obsCreateSession
+POST {{baseUrl}}/api/conferences/{{obsCreateConference.response.body.$.id}}/sessions
+Content-Type: application/json
+
+{
+  "title": "Tracing Durable Messages with RabbitMQ and Kafka",
+  "startsAtUtc": "2027-06-01T10:00:00Z",
+  "endsAtUtc": "2027-06-01T11:30:00Z"
+}
+
+### STOP HERE — Run docs/OBSERVABILITY_E2E_SEED.sql with session id from 02.
+### 03 — Create synthetic participant Olivia Bennett
+# @name obsCreateParticipant1
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Olivia Bennett",
+  "email": "olivia.bennett.m42d3.{{$guid}}@example.com"
+}
+
+### 04 — Register Olivia
+# @name obsCreateRegistration1
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{obsCreateParticipant1.response.body.$.id}}",
+  "sessionId": "{{obsCreateSession.response.body.$.id}}"
+}
+
+### 05 — Create synthetic participant Noah Brooks
+# @name obsCreateParticipant2
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Noah Brooks",
+  "email": "noah.brooks.m42d3.{{$guid}}@example.com"
+}
+
+### 06 — Register Noah
+# @name obsCreateRegistration2
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{obsCreateParticipant2.response.body.$.id}}",
+  "sessionId": "{{obsCreateSession.response.body.$.id}}"
+}
+
+### 07 — Create synthetic participant Sophie Chen
+# @name obsCreateParticipant3
+POST {{baseUrl}}/api/participants
+Content-Type: application/json
+
+{
+  "displayName": "Sophie Chen",
+  "email": "sophie.chen.m42d3.{{$guid}}@example.com"
+}
+
+### 08 — Register Sophie
+# @name obsCreateRegistration3
+POST {{baseUrl}}/api/registrations
+Content-Type: application/json
+
+{
+  "participantId": "{{obsCreateParticipant3.response.body.$.id}}",
+  "sessionId": "{{obsCreateSession.response.body.$.id}}"
+}
+
+### 09 — Read Olivia's latest status (repeat only GET while Pending)
+GET {{baseUrl}}/api/registrations/{{obsCreateRegistration1.response.body.$.id}}
+
+### 10 — Read Noah's latest status (repeat only GET while Pending)
+GET {{baseUrl}}/api/registrations/{{obsCreateRegistration2.response.body.$.id}}
+
+### 11 — Read Sophie's latest status (repeat only GET while Pending)
+GET {{baseUrl}}/api/registrations/{{obsCreateRegistration3.response.body.$.id}}
+
+# Expected for this fresh session after asynchronous processing:
+#   Two Confirmed, one Rejected, zero Pending (order is not guaranteed).
+# Do NOT re-run POST registrations to fix a Pending status.

@@ -3,7 +3,8 @@
     "ConferenceProFlow.Analytics.Worker": {
       "commandName": "Project",
       "environmentVariables": {
-        "DOTNET_ENVIRONMENT": "Development"
+        "DOTNET_ENVIRONMENT": "Development",
+        "Observability__ConsoleExporter__Enabled": "true"
       }
     }
   }

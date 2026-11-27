@@ -4,6 +4,7 @@ using System.Text.Json;
 using ConferenceProFlow.Registration.Api.Features.Registrations.Messages;
 using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using RegistrationEntity = ConferenceProFlow.Registration.Api.Domain.Entities.Registration;
+using System.Diagnostics;
 
 namespace ConferenceProFlow.Registration.Api.Features.Registrations;
 
@@ -79,12 +80,38 @@ public static class RegistrationEndpoints
                 integrationEvent,
                 JsonSerializerOptions.Web);
 
+            // Capture the current HTTP trace context before committing the registration and its durable Outbox message.
+            var currentActivity = Activity.Current;
+
+            string? traceParent = null;
+            string? traceState = null;
+
+            if (currentActivity?.IdFormat == ActivityIdFormat.W3C)
+            {
+                var candidateParent = currentActivity.Id;
+                var candidateState = currentActivity.TraceStateString;
+
+                // Invalid or oversized telemetry must not prevent registration.
+                if (candidateParent is { Length: <= 55 } &&
+                    candidateState?.Length <= 512 != false &&
+                    ActivityContext.TryParse(
+                        candidateParent,
+                        candidateState,
+                        out _))
+                {
+                    traceParent = candidateParent;
+                    traceState = candidateState;
+                }
+            }
+
             // Create the corresponding Outbox record.
             var outboxMessage = OutboxMessage.Create(
                 integrationEvent.MessageId,
                 RegistrationRequestedV1.MessageType,
                 payload,
-                occurredAtUtc);
+                occurredAtUtc,
+                traceParent,
+                traceState);
 
             // Track both records in the same DbContext.
             db.Registrations.Add(registration);

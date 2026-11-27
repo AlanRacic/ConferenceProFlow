@@ -1,7 +1,9 @@
-﻿using ConferenceProFlow.Allocation.Worker.Domain.Entities;
+using ConferenceProFlow.Allocation.Worker.Domain.Entities;
 using ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence;
+using ConferenceProFlow.Allocation.Worker.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 
 namespace ConferenceProFlow.Allocation.Worker.Processing;
 
@@ -47,7 +49,6 @@ public sealed class AllocationInboxProcessorService : BackgroundService
             _options.PollIntervalSeconds);
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(_options.PollIntervalSeconds));
-
         try
         {
             do
@@ -109,16 +110,31 @@ public sealed class AllocationInboxProcessorService : BackgroundService
             query = query.Where(message => !deferredIds.Contains(message.Id));
         }
 
-        var messageIds = await query
+        // Fetch the persisted tracing context with the same existing SQL query;
+        // do not introduce an additional database round-trip for each message.
+        var pendingItems = await query
             .OrderBy(message => message.ReceivedAtUtc)
             .ThenBy(message => message.Id)
-            .Select(message => message.Id)
+            .Select(message => new
+            {
+                message.Id,
+                message.TraceParent,
+                message.TraceState
+            })
             .Take(_options.BatchSize)
             .ToListAsync(cancellationToken);
 
-        foreach (var messageId in messageIds)
+        foreach (var pendingItem in pendingItems)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var messageId = pendingItem.Id;
+
+            // SQL Inbox is a durable asynchronous boundary: create a NEW processing
+            // span linked to the previously persisted consumer context, rather than
+            // treating the finished consumer span as a live synchronous parent.
+            using var activity = AllocationInboxProcessingTelemetry.StartActivity(
+                pendingItem.TraceParent,
+                pendingItem.TraceState);
 
             // A new scope/DbContext per message keeps EF tracking isolated, including after concurrency retries or SQL failures.
             await using var processingScope = _scopeFactory.CreateAsyncScope();
@@ -127,6 +143,7 @@ public sealed class AllocationInboxProcessorService : BackgroundService
             try
             {
                 var result = await processor.ProcessAsync(messageId, cancellationToken);
+                activity?.SetTag("conferenceproflow.allocation.processing.result", result.ToString());
 
                 if (result is AllocationProcessingResult.WaitingForInventory
                     or AllocationProcessingResult.NotFound)
@@ -144,10 +161,15 @@ public sealed class AllocationInboxProcessorService : BackgroundService
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                // Host shutdown is not a business-processing error.
+                activity?.SetTag("conferenceproflow.allocation.processing.result", "cancelled");
                 throw;
             }
             catch (Exception exception)
             {
+                // Keep the existing retry behavior; observability only records the failure.
+                activity?.SetStatus(ActivityStatusCode.Error, exception.GetType().Name);
+                activity?.SetTag("conferenceproflow.allocation.processing.result", "error");
                 Defer(messageId);
                 _logger.LogError(
                     exception,

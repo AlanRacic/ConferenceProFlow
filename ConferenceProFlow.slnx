@@ -22,9 +22,17 @@
     <File Path="docs/M3_MILESTONE_VALIDATION.md" />
     <File Path="docs/MESSAGING_DESIGN.md" />
     <File Path="docs/OBSERVABILITY_BASELINE_CHECKS.sql" />
+    <File Path="docs/OBSERVABILITY_E2E_CHECKS.sql" />
+    <File Path="docs/OBSERVABILITY_E2E_DEMO.http" />
+    <File Path="docs/OBSERVABILITY_E2E_RUNBOOK.md" />
+    <File Path="docs/OBSERVABILITY_E2E_SEED.sql" />
+    <File Path="docs/OBSERVABILITY_LOCAL_JAEGER.md" />
+    <File Path="docs/OBSERVABILITY_M4_2_VALIDATION_REPORT.md" />
+    <File Path="docs/OBSERVABILITY_OTLP_APPLICATION_EXPORT.md" />
     <File Path="docs/OBSERVABILITY_PERFORMANCE_DESIGN.md" />
     <File Path="docs/PROJECT_CHARTER.md" />
     <File Path="docs/REPLAY_SNAPSHOT_STORAGE.md" />
+    <File Path="docs/TESTING_RESOURCE_CONSTRAINED.md" />
     <File Path="LICENSE.txt" />
     <File Path="README.md" />
   </Folder>

@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Confluent.Kafka;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using ConferenceProFlow.Registration.Api.Messaging.Contracts;
+using ConferenceProFlow.Registration.Api.Observability;
 using Microsoft.EntityFrameworkCore;
 
 namespace ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
@@ -17,7 +19,6 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
     private const int BatchSize = 20;
     private const int PollIntervalMilliseconds = 1000;
     private const string DefaultTopic = "conferenceproflow.registration-finalized.v1";
-
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<KafkaAnalyticsOutboxPublisherService> _logger;
     private readonly string _topic;
@@ -31,22 +32,18 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
-
         var bootstrapServers = configuration["Kafka:BootstrapServers"];
         if (string.IsNullOrWhiteSpace(bootstrapServers))
             throw new InvalidOperationException(
                 "Kafka:BootstrapServers must be configured when KafkaAnalyticsPublisher:Enabled is true.");
-
         _topic = configuration["Kafka:RegistrationFinalizedTopic"] ?? DefaultTopic;
         if (string.IsNullOrWhiteSpace(_topic))
             throw new InvalidOperationException("Kafka topic must not be empty.");
-
         _alertAfterAttempts = configuration.GetValue<int?>("KafkaAnalyticsPublisher:AlertAfterAttempts")
             ?? AnalyticsOutboxPublishAlertPolicy.DefaultAlertAfterAttempts;
         if (!AnalyticsOutboxPublishAlertPolicy.IsValidThreshold(_alertAfterAttempts))
             throw new InvalidOperationException(
                 "KafkaAnalyticsPublisher:AlertAfterAttempts must be between 1 and 10000.");
-
         _producer = new ProducerBuilder<string, string>(new ProducerConfig
         {
             BootstrapServers = bootstrapServers,
@@ -60,7 +57,6 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Kafka Analytics Outbox publisher enabled; topic {Topic}", _topic);
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -76,7 +72,6 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
                 // A temporary SQL outage must not terminate the Registration API.
                 _logger.LogError(ex, "Kafka Analytics Outbox polling failed; will retry");
             }
-
             try
             {
                 await Task.Delay(PollIntervalMilliseconds, stoppingToken);
@@ -106,7 +101,6 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
                 .Take(BatchSize)
                 .ToListAsync(cancellationToken);
         }
-
         foreach (var messageId in messageIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -118,7 +112,6 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
     {
         await using var scope = _scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<RegistrationDbContext>();
-
         var outbox = await db.AnalyticsOutboxMessages
             .SingleOrDefaultAsync(x => x.Id == messageId, cancellationToken);
 
@@ -126,6 +119,12 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
             return;
         if (outbox.NextAttemptAtUtc is { } retryAt && retryAt > DateTimeOffset.UtcNow)
             return;
+
+        // The original reconciliation span may have finished long before this
+        // polling iteration. The new producer span LINKs to persisted context.
+        using var publishActivity = KafkaAnalyticsPublishTelemetry.StartActivity(
+            outbox.TraceParent, outbox.TraceState);
+        publishActivity?.SetTag("messaging.destination.name", _topic);
 
         // All retries must use the *original* durable payload and MessageId.
         // There must not be a fresh RegistrationFinalizedV1.Create() call here.
@@ -135,32 +134,37 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
         {
             if (outbox.MessageType != RegistrationFinalizedV1.EventType)
                 throw new InvalidOperationException("Unexpected analytics event type.");
-
             var integrationEvent = JsonSerializer.Deserialize<RegistrationFinalizedV1>(outbox.Payload)
                 ?? throw new JsonException("Analytics outbox payload is empty.");
             integrationEvent.Validate();
             if (integrationEvent.MessageId != outbox.Id ||
                 integrationEvent.RegistrationId != outbox.RegistrationId)
                 throw new InvalidOperationException("Analytics outbox identity does not match its payload.");
-
             payloadValidated = true;
+
+            var headers = KafkaAnalyticsPublishTelemetry.CreateHeaders(
+                outbox.Id,
+                outbox.MessageType,
+                publishActivity,
+                outbox.TraceParent,
+                outbox.TraceState);
+
             await _producer.ProduceAsync(_topic, new Message<string, string>
             {
                 Key = integrationEvent.SessionId.ToString("D"),
                 Value = outbox.Payload,
-                Headers = new Headers
-                {
-                    { "message-id", System.Text.Encoding.UTF8.GetBytes(outbox.Id.ToString("D")) },
-                    { "event-type", System.Text.Encoding.UTF8.GetBytes(outbox.MessageType) }
-                }
+                Headers = headers
             }, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            // Host shutdown is not a failed publication attempt.
             throw;
         }
         catch (Exception ex)
         {
+            publishActivity?.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
+
             // Keep this row pending. Do NOT mark it published or silently discard it.
             // Retain the existing exponential backoff (capped at 60 seconds).
             // If this SQL write fails, the outer polling loop will retry.
@@ -171,7 +175,6 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
                 AnalyticsOutboxPublishAlertPolicy.Describe(kind, ex),
                 TimeSpan.FromSeconds(retrySeconds));
             await db.SaveChangesAsync(cancellationToken);
-
             if (AnalyticsOutboxPublishAlertPolicy.ShouldEscalate(
                     outbox.PublishAttempts, _alertAfterAttempts))
             {
@@ -195,8 +198,18 @@ public sealed class KafkaAnalyticsOutboxPublisherService : BackgroundService
 
         // Kafka acknowledged the event. If this DB save fails, the event remains
         // pending and may be published again; at-least-once semantics are explicit.
-        outbox.MarkPublished(DateTimeOffset.UtcNow);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            outbox.MarkPublished(DateTimeOffset.UtcNow);
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Preserve the existing retry-on-next-poll semantics when SQL fails.
+            publishActivity?.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
+            throw;
+        }
+
         _logger.LogInformation("Kafka Analytics event {MessageId} published to {Topic}", outbox.Id, _topic);
     }
 

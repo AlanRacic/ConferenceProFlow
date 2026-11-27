@@ -1,7 +1,9 @@
-﻿using ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence;
+using ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence;
 using ConferenceProFlow.Allocation.Worker.Messaging.Outbox;
+using ConferenceProFlow.Allocation.Worker.Observability;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using System.Diagnostics;
 using AllocationEntity = ConferenceProFlow.Allocation.Worker.Domain.Entities.Allocation;
 
 namespace ConferenceProFlow.Allocation.Worker.Processing;
@@ -9,7 +11,6 @@ namespace ConferenceProFlow.Allocation.Worker.Processing;
 public sealed class AllocationProcessingService
 {
     private const string CapacityReachedReason = "Session capacity reached.";
-
     // Retry the whole decision after a recognized concurrency conflict, never only the stale SaveChanges call.
     private const int MaxProcessingAttempts = 16;
 
@@ -41,7 +42,6 @@ public sealed class AllocationProcessingService
             {
                 // Failed SaveChanges is rolled back; remove stale entities and the uncommitted outbox entry before calculating a fresh decision.
                 _db.ChangeTracker.Clear();
-
                 var delayMs = Math.Min(attempt * 25 + Random.Shared.Next(10, 40), 300);
                 await Task.Delay(TimeSpan.FromMilliseconds(delayMs), cancellationToken);
             }
@@ -62,36 +62,44 @@ public sealed class AllocationProcessingService
         {
             return AllocationProcessingResult.NotFound;
         }
-
         if (inboxMessage.ProcessedAtUtc is not null)
         {
             // Existing allocations from before M2.6 are intentionally not auto-backfilled here; see M2.6B documentation.
             return AllocationProcessingResult.AlreadyProcessed;
         }
 
+        // Durable processing boundary: capture the processing span when one exists;
+        // otherwise preserve the valid context read from this Inbox row.
+        // A missing/invalid trace context does not affect the allocation decision.
+        var (traceParent, traceState) = AllocationOutboxTraceContext.Capture(
+            Activity.Current,
+            inboxMessage.TraceParent,
+            inboxMessage.TraceState);
+
         var existingAllocation = await _db.Allocations
             .AsNoTracking()
             .SingleOrDefaultAsync(
                 x => x.RegistrationId == inboxMessage.RegistrationId,
                 cancellationToken);
-
         if (existingAllocation is not null)
         {
             if (existingAllocation.SessionId != inboxMessage.SessionId)
             {
                 throw new InvalidOperationException("Existing allocation belongs to a different session.");
             }
-
             // Recovery: an allocation already exists. Do not reserve another seat.
             // Ensure its result event exists before completing the pending Inbox.
             var hasOutboxEvent = await _db.AllocationOutboxMessages
                 .AnyAsync(
                     x => x.AllocationId == existingAllocation.Id,
                     cancellationToken);
-
             if (!hasOutboxEvent)
             {
-                _db.AllocationOutboxMessages.Add(AllocationOutboxMessageFactory.Create(existingAllocation));
+                _db.AllocationOutboxMessages.Add(
+                    AllocationOutboxMessageFactory.Create(
+                        existingAllocation,
+                        traceParent,
+                        traceState));
             }
 
             inboxMessage.MarkProcessed(DateTimeOffset.UtcNow);
@@ -113,7 +121,6 @@ public sealed class AllocationProcessingService
 
         var reserved = inventory.TryReserveSeat();
         var processedAtUtc = DateTimeOffset.UtcNow;
-
         var allocation = reserved
             ? AllocationEntity.CreateConfirmed(
                 inboxMessage.RegistrationId,
@@ -127,13 +134,15 @@ public sealed class AllocationProcessingService
 
         _db.Allocations.Add(allocation);
         _db.AllocationOutboxMessages.Add(
-            AllocationOutboxMessageFactory.Create(allocation));
+            AllocationOutboxMessageFactory.Create(
+                allocation,
+                traceParent,
+                traceState));
         inboxMessage.MarkProcessed(processedAtUtc);
 
         // ONE SaveChanges transaction for inventory, allocation, inbox and outbox.
         // The outbox event remains pending for the publisher introduced in M2.6C.
         await _db.SaveChangesAsync(cancellationToken);
-
         return reserved
             ? AllocationProcessingResult.Confirmed
             : AllocationProcessingResult.Rejected;
@@ -145,7 +154,6 @@ public sealed class AllocationProcessingService
         {
             return true;
         }
-
         if (exception is DbUpdateException
             {
                 InnerException: SqlException sqlException

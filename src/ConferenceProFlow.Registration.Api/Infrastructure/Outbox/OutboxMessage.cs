@@ -1,4 +1,6 @@
-﻿namespace ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
+﻿using System.Diagnostics;
+
+namespace ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 
 public sealed class OutboxMessage
 {
@@ -15,6 +17,11 @@ public sealed class OutboxMessage
 
     public DateTimeOffset OccurredAtUtc { get; private set; }
 
+    // W3C trace context persisted across the durable Outbox boundary.
+    public string? TraceParent { get; private set; }
+
+    public string? TraceState { get; private set; }
+
     public DateTimeOffset? PublishedAtUtc { get; private set; }
 
     public int PublishAttempts { get; private set; }
@@ -26,10 +33,12 @@ public sealed class OutboxMessage
     public DateTimeOffset? QuarantinedAtUtc { get; private set; }
 
     public static OutboxMessage Create(
-        Guid id,
-        string messageType,
-        string payload,
-        DateTimeOffset occurredAtUtc)
+    Guid id,
+    string messageType,
+    string payload,
+    DateTimeOffset occurredAtUtc,
+    string? traceParent = null,
+    string? traceState = null)
     {
         if (id == Guid.Empty)
         {
@@ -58,12 +67,38 @@ public sealed class OutboxMessage
             throw new ArgumentException("OccurredAtUtc must be a valid UTC timestamp.", nameof(occurredAtUtc));
         }
 
+        // Trace context is optional, but must be valid when supplied.
+        if (traceParent is null && traceState is not null)
+        {
+            throw new ArgumentException(
+                "TraceState requires TraceParent.",
+                nameof(traceState));
+        }
+
+        if (traceState is { Length: > 512 })
+        {
+            throw new ArgumentException(
+                "TraceState must not exceed 512 characters.",
+                nameof(traceState));
+        }
+
+        if (traceParent is not null &&
+            (traceParent.Length > 55 ||
+             !ActivityContext.TryParse(traceParent, traceState, out _)))
+        {
+            throw new ArgumentException(
+                "Invalid W3C trace context.",
+                nameof(traceParent));
+        }
+
         return new OutboxMessage
         {
             Id = id,
             MessageType = normalizedMessageType,
             Payload = payload,
             OccurredAtUtc = occurredAtUtc,
+            TraceParent = traceParent,
+            TraceState = traceState,
             PublishedAtUtc = null,
             PublishAttempts = 0,
             LastError = null,

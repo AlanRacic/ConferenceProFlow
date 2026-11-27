@@ -2,6 +2,8 @@
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using RabbitMQ.Client;
+using System.Diagnostics;
+using ConferenceProFlow.Registration.Api.Observability;
 
 namespace ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 
@@ -149,6 +151,33 @@ public sealed class OutboxPublisherService : BackgroundService
                 var channel = _channel
                     ?? throw new InvalidOperationException("RabbitMQ channel is not initialized.");
 
+                // Restore the original HTTP trace context persisted in the Outbox.
+                ActivityContext? originalContext = null;
+
+                if (message.TraceParent is not null &&
+                    ActivityContext.TryParse(
+                        message.TraceParent,
+                        message.TraceState,
+                        out var parsedContext))
+                {
+                    originalContext = parsedContext;
+                }
+
+                // The publisher runs asynchronously, potentially long after the originating HTTP request has completed.
+                using var publishActivity = RegistrationTelemetry.Source.StartActivity(
+                    "rabbitmq.registration-request.publish",
+                    ActivityKind.Producer,
+                    parentContext: default,
+                    links: originalContext is { } context
+                        ? new[] { new ActivityLink(context) }
+                        : null);
+
+                publishActivity?.SetTag("messaging.system", "rabbitmq");
+                publishActivity?.SetTag("messaging.operation.name", "send");
+                publishActivity?.SetTag(
+                    "messaging.destination.name",
+                    MessagingTopology.ExchangeName);
+
                 var properties = new BasicProperties
                 {
                     MessageId = message.Id.ToString("D"),
@@ -157,16 +186,53 @@ public sealed class OutboxPublisherService : BackgroundService
                     Persistent = true
                 };
 
+                // Prefer the current producer span context.
+                // If tracing is disabled, preserve the persisted Outbox context.
+                var headerTraceParent = publishActivity?.Id ?? message.TraceParent;
+
+                var headerTraceState = publishActivity is not null
+                    ? publishActivity.TraceStateString
+                    : message.TraceState;
+
+                // Add W3C trace headers without changing the business payload.
+                if (headerTraceParent is not null &&
+                    ActivityContext.TryParse(
+                        headerTraceParent,
+                        headerTraceState,
+                        out _))
+                {
+                    properties.Headers = new Dictionary<string, object?>
+                    {
+                        ["traceparent"] = Encoding.ASCII.GetBytes(headerTraceParent)
+                    };
+
+                    if (!string.IsNullOrEmpty(headerTraceState))
+                    {
+                        properties.Headers["tracestate"] = Encoding.ASCII.GetBytes(headerTraceState);
+                    }
+                }
+
                 var body = Encoding.UTF8.GetBytes(message.Payload);
 
                 // Publisher confirmation is awaited with a bounded token.
-                await channel.BasicPublishAsync(
-                    exchange: MessagingTopology.ExchangeName,
-                    routingKey: message.MessageType,
-                    mandatory: true,
-                    basicProperties: properties,
-                    body: body,
-                    cancellationToken: attemptCts.Token);
+                try
+                {
+                    await channel.BasicPublishAsync(
+                        exchange: MessagingTopology.ExchangeName,
+                        routingKey: message.MessageType,
+                        mandatory: true,
+                        basicProperties: properties,
+                        body: body,
+                        cancellationToken: attemptCts.Token);
+                }
+                catch (Exception ex)
+                {
+                    publishActivity?.SetStatus(
+                        ActivityStatusCode.Error,
+                        ex.GetType().Name);
+
+                    throw;
+                }
             }
             catch (OperationCanceledException)
                 when (cancellationToken.IsCancellationRequested)

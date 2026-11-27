@@ -180,6 +180,13 @@ public sealed class RegistrationDbContext : DbContext
             entity.Property(x => x.OccurredAtUtc)
                 .IsRequired();
 
+            // Optional W3C trace context for durable message correlation.
+            entity.Property(x => x.TraceParent)
+                .HasMaxLength(55);
+
+            entity.Property(x => x.TraceState)
+                .HasMaxLength(512);
+
             entity.Property(x => x.PublishedAtUtc);
 
             entity.Property(x => x.PublishAttempts)

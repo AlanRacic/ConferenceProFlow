@@ -77,7 +77,10 @@ public sealed class OutboxPublisherIntegrationTests : IAsyncLifetime
         return new RegistrationDbContext(options);
     }
 
-    private async Task<RegistrationRequestedV1> CreateOutboxMessageAsync(string messageType = RegistrationRequestedV1.MessageType)
+    private async Task<RegistrationRequestedV1> CreateOutboxMessageAsync(
+        string messageType = RegistrationRequestedV1.MessageType,
+        string? traceParent = null,
+        string? traceState = null)
     {
         var integrationEvent = new RegistrationRequestedV1(
             Guid.NewGuid(),
@@ -93,7 +96,9 @@ public sealed class OutboxPublisherIntegrationTests : IAsyncLifetime
             integrationEvent.MessageId,
             messageType,
             payload,
-            integrationEvent.OccurredAtUtc);
+            integrationEvent.OccurredAtUtc,
+            traceParent,
+            traceState);
 
         await using var db = CreateDbContext();
 
@@ -174,7 +179,13 @@ public sealed class OutboxPublisherIntegrationTests : IAsyncLifetime
         // Arrange
         var cancellationToken = TestContext.Current.CancellationToken;
 
-        var integrationEvent = await CreateOutboxMessageAsync();
+        const string traceParent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        const string traceState = "vendor=value";
+
+        var integrationEvent = await CreateOutboxMessageAsync(
+            traceParent: traceParent,
+            traceState: traceState);
 
         var rabbitMqUri = _rabbitMqFixture.ConnectionUri;
 
@@ -225,6 +236,37 @@ public sealed class OutboxPublisherIntegrationTests : IAsyncLifetime
             Assert.Equal(
                 integrationEvent.MessageId.ToString("D"),
                 delivery.BasicProperties.MessageId);
+
+            var headers = delivery.BasicProperties.Headers;
+
+            Assert.NotNull(headers);
+
+            Assert.True(headers.TryGetValue(
+                "traceparent",
+                out var receivedTraceParent));
+
+            Assert.True(headers.TryGetValue(
+                "tracestate",
+                out var receivedTraceState));
+
+            static string ReadTextHeader(object? value) =>
+                value switch
+                {
+                    byte[] bytes => Encoding.UTF8.GetString(bytes),
+                    ReadOnlyMemory<byte> bytes =>
+                        Encoding.UTF8.GetString(bytes.Span),
+                    string text => text,
+                    _ => throw new InvalidOperationException(
+                        "Unexpected RabbitMQ trace header type.")
+                };
+
+            Assert.Equal(
+                traceParent,
+                ReadTextHeader(receivedTraceParent));
+
+            Assert.Equal(
+                traceState,
+                ReadTextHeader(receivedTraceState));
 
             Assert.Equal(
                 "application/json",

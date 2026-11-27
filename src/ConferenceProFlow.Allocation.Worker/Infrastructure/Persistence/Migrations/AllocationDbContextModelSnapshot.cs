@@ -78,6 +78,14 @@ namespace ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence.Migrati
                     b.Property<Guid>("SessionId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("TraceParent")
+                        .HasMaxLength(55)
+                        .HasColumnType("nvarchar(55)");
+
+                    b.Property<string>("TraceState")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("RegistrationId")
@@ -155,6 +163,14 @@ namespace ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence.Migrati
 
                     b.Property<DateTimeOffset?>("QuarantinedAtUtc")
                         .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("TraceParent")
+                        .HasMaxLength(55)
+                        .HasColumnType("nvarchar(55)");
+
+                    b.Property<string>("TraceState")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
 
                     b.HasKey("Id");
 
