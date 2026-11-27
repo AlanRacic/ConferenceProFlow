@@ -1,4 +1,6 @@
-﻿namespace ConferenceProFlow.Allocation.Worker.Messaging.Outbox;
+using System.Diagnostics;
+
+namespace ConferenceProFlow.Allocation.Worker.Messaging.Outbox;
 
 /// <summary>
 /// A durable allocation-result event. The payload and identity never change when publication is retried.
@@ -18,25 +20,46 @@ public sealed class AllocationOutboxMessage
     public DateTimeOffset? NextAttemptAtUtc { get; private set; }
     public DateTimeOffset? QuarantinedAtUtc { get; private set; }
 
+    // Optional W3C tracing metadata. Not part of the immutable business JSON payload.
+    public string? TraceParent { get; private set; }
+    public string? TraceState { get; private set; }
+
     public static AllocationOutboxMessage Create(
         Guid id,
         Guid allocationId,
         string messageType,
         string payload,
-        DateTimeOffset occurredAtUtc)
+        DateTimeOffset occurredAtUtc,
+        string? traceParent = null,
+        string? traceState = null)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("Message ID must not be empty.", nameof(id));
+
         if (allocationId == Guid.Empty)
             throw new ArgumentException("Allocation ID must not be empty.", nameof(allocationId));
+
         if (string.IsNullOrWhiteSpace(messageType))
             throw new ArgumentException("Message type is required.", nameof(messageType));
+
         var normalizedType = messageType.Trim();
         if (normalizedType.Length > 160)
             throw new ArgumentException("Message type must not exceed 160 characters.", nameof(messageType));
+
         if (string.IsNullOrWhiteSpace(payload))
             throw new ArgumentException("Message payload is required.", nameof(payload));
+
         ValidateUtc(occurredAtUtc, nameof(occurredAtUtc));
+
+        if (traceParent is null && traceState is not null)
+            throw new ArgumentException("TraceState requires TraceParent.", nameof(traceState));
+
+        if (traceState?.Length > 512)
+            throw new ArgumentException("TraceState must not exceed 512 characters.", nameof(traceState));
+
+        if (traceParent is not null &&
+            (traceParent.Length != 55 || !ActivityContext.TryParse(traceParent, traceState, out _)))
+            throw new ArgumentException("Invalid W3C trace context.", nameof(traceParent));
 
         return new AllocationOutboxMessage
         {
@@ -44,7 +67,9 @@ public sealed class AllocationOutboxMessage
             AllocationId = allocationId,
             MessageType = normalizedType,
             Payload = payload,
-            OccurredAtUtc = occurredAtUtc
+            OccurredAtUtc = occurredAtUtc,
+            TraceParent = traceParent,
+            TraceState = traceState
         };
     }
 

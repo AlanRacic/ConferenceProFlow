@@ -1,7 +1,9 @@
-﻿using ConferenceProFlow.Allocation.Worker.Messaging.Inbox;
+using ConferenceProFlow.Allocation.Worker.Messaging.Inbox;
 using ConferenceProFlow.Allocation.Worker.Messaging.Contracts;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using System.Diagnostics;
+using ConferenceProFlow.Allocation.Worker.Observability;
 
 namespace ConferenceProFlow.Allocation.Worker.Messaging.Consumers;
 
@@ -211,6 +213,23 @@ public sealed class RegistrationRequestConsumerService : BackgroundService
         IChannel parkingChannel,
         CancellationToken cancellationToken)
     {
+        // Trace metadata is optional; malformed headers must never block processing.
+        var hasRemoteParent = RabbitMqTraceContextReader.TryExtract(
+            delivery.BasicProperties.Headers,
+            out var parentContext);
+
+        using var activity = hasRemoteParent
+            ? AllocationTelemetry.Source.StartActivity(
+                "rabbitmq.registration-request.process",
+                ActivityKind.Consumer,
+                parentContext)
+            : AllocationTelemetry.Source.StartActivity(
+                "rabbitmq.registration-request.process",
+                ActivityKind.Consumer);
+
+        activity?.SetTag("messaging.system", "rabbitmq");
+        activity?.SetTag("messaging.operation.name", "process");
+
         if (delivery.RoutingKey !=
                 MessagingTopology.RegistrationRequestedRoutingKey ||
             delivery.BasicProperties.Type !=
@@ -265,10 +284,18 @@ public sealed class RegistrationRequestConsumerService : BackgroundService
         var inboxService = scope.ServiceProvider
             .GetRequiredService<InboxReceiveService>();
 
+        // Keep the current consumer span context (or the valid remote parent when
+        // tracing is not being recorded) across the durable SQL Inbox boundary.
+        var capturedTraceContext = InboxTraceContext.Capture(
+            activity,
+            hasRemoteParent ? parentContext : null);
+
         var result = await inboxService.ReceiveAsync(
             message,
             DateTimeOffset.UtcNow,
-            cancellationToken);
+            cancellationToken,
+            capturedTraceContext.TraceParent,
+            capturedTraceContext.TraceState);
 
         switch (result)
         {

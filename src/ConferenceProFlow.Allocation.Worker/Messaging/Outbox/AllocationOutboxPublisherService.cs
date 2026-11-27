@@ -1,5 +1,7 @@
-﻿using System.Text;
+using System.Diagnostics;
+using System.Text;
 using ConferenceProFlow.Allocation.Worker.Infrastructure.Persistence;
+using ConferenceProFlow.Allocation.Worker.Observability;
 using Microsoft.EntityFrameworkCore;
 using RabbitMQ.Client;
 
@@ -14,7 +16,6 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
     private const int BatchSize = 20;
-
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AllocationOutboxPublisherService> _logger;
     private readonly ConnectionFactory _connectionFactory;
@@ -30,11 +31,9 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
-
         var timeoutSeconds = configuration.GetValue<int?>("AllocationOutboxPublisher:PublishTimeoutSeconds") ?? 15;
         if (timeoutSeconds is < 1 or > 120)
             throw new InvalidOperationException("AllocationOutboxPublisher:PublishTimeoutSeconds must be between 1 and 120.");
-
         _publishTimeout = TimeSpan.FromSeconds(timeoutSeconds);
         _connectionFactory = new ConnectionFactory
         {
@@ -69,7 +68,6 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
                     _logger.LogError(ex, "Allocation Outbox publishing cycle failed.");
                     await ResetConnectionAsync();
                 }
-
                 try
                 {
                     await Task.Delay(PollInterval, stoppingToken);
@@ -92,7 +90,6 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
         await using var scope = _scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AllocationDbContext>();
         var now = DateTimeOffset.UtcNow;
-
         var messages = await db.AllocationOutboxMessages
             .Where(x => x.PublishedAtUtc == null &&
                         x.QuarantinedAtUtc == null &&
@@ -118,6 +115,16 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
             using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             attemptCts.CancelAfter(_publishTimeout);
 
+            // The Allocation decision was committed before this background publication.
+            // Its persisted W3C metadata is a LINK, not a synchronous parent.
+            using var publishActivity = AllocationResultPublishTelemetry.StartActivity(
+                message.TraceParent,
+                message.TraceState);
+
+            publishActivity?.SetTag("messaging.system", "rabbitmq");
+            publishActivity?.SetTag("messaging.operation.name", "send");
+            publishActivity?.SetTag("messaging.destination.name", MessagingTopology.ExchangeName);
+
             try
             {
                 await EnsureConnectionAsync(attemptCts.Token);
@@ -127,10 +134,16 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
                     MessageId = message.Id.ToString("D"),
                     Type = message.MessageType,
                     ContentType = "application/json",
-                    Persistent = true
+                    Persistent = true,
+                    // Metadata only. Never modify the durable business JSON or MessageId.
+                    Headers = AllocationResultPublishTelemetry.CreateHeaders(
+                        publishActivity,
+                        message.TraceParent,
+                        message.TraceState)
                 };
 
-                // Await broker confirmation. With mandatory=true and confirmation tracking, an unroutable message causes BasicPublishAsync to fail.
+                // Await broker confirmation. With mandatory=true and confirmation tracking,
+                // an unroutable message causes BasicPublishAsync to fail.
                 await channel.BasicPublishAsync(
                     exchange: MessagingTopology.ExchangeName,
                     routingKey: MessagingTopology.AllocationDecidedRoutingKey,
@@ -141,26 +154,28 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                throw; // Host shutdown is not a failed publication attempt.
+                // Host shutdown is not a failed publication attempt.
+                throw;
             }
             catch (Exception ex)
             {
+                publishActivity?.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
+
                 var error = ex is OperationCanceledException && attemptCts.IsCancellationRequested
                     ? $"RabbitMQ publishing timed out after {_publishTimeout.TotalSeconds:0} seconds; outcome uncertain."
                     : string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
-
                 message.RecordFailure(error, DateTimeOffset.UtcNow);
                 await db.SaveChangesAsync(cancellationToken);
                 _logger.LogWarning(ex,
                     "Allocation result {MessageId} failed to publish. Attempt {Attempts}, next retry {RetryAt}.",
                     message.Id, message.PublishAttempts, message.NextAttemptAtUtc);
-
                 await ResetConnectionAsync();
                 // Avoid a burst of broker connection failures across the batch.
                 break;
             }
 
-            // If SQL persistence fails here, the broker may already have the message. At-least-once redelivery is intentional; M2.6D deduplicates.
+            // If SQL persistence fails here, the broker may already have the message.
+            // At-least-once redelivery is intentional; M2.6D deduplicates.
             message.MarkPublished(DateTimeOffset.UtcNow);
             await db.SaveChangesAsync(cancellationToken);
             _logger.LogInformation("Published allocation result {MessageId}.", message.Id);
@@ -173,14 +188,12 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
             return;
 
         await ResetConnectionAsync();
-
         _connection = await _connectionFactory.CreateConnectionAsync(cancellationToken);
         _channel = await _connection.CreateChannelAsync(
             new CreateChannelOptions(
                 publisherConfirmationsEnabled: true,
                 publisherConfirmationTrackingEnabled: true),
             cancellationToken);
-
         // The Registration result consumer owns the queue and binding (M2.6D).
         // Do NOT mark an unroutable event as published.
         await _channel.ExchangeDeclareAsync(
@@ -199,7 +212,6 @@ public sealed class AllocationOutboxPublisherService : BackgroundService
             catch (Exception ex) { _logger.LogWarning(ex, "Could not dispose publisher channel."); }
             finally { _channel = null; }
         }
-
         if (_connection is not null)
         {
             try { await _connection.DisposeAsync(); }

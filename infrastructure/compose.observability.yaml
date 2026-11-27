@@ -1,0 +1,15 @@
+# M4.2D1: optional, independent, local-only tracing backend.
+# Intentionally separate from infrastructure/compose.yaml (SQL/RabbitMQ/Kafka).
+# Start with: docker compose -f infrastructure/compose.observability.yaml up -d
+name: conferenceproflow-observability
+
+services:
+  jaeger:
+    # Pinned to a documented Jaeger v2 release. Local demo uses in-memory storage.
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.23.0
+    ports:
+      # Bind ONLY to loopback: this demo has no authentication or TLS.
+      - "127.0.0.1:16686:16686" # Jaeger query UI
+      - "127.0.0.1:4317:4317"   # OTLP/gRPC
+      - "127.0.0.1:4318:4318"   # OTLP/HTTP (future .NET exporters)
+    restart: "no"

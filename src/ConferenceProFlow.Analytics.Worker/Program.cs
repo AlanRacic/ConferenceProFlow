@@ -6,8 +6,26 @@ using ConferenceProFlow.Analytics.Worker.Messaging.Consumers;
 using ConferenceProFlow.Analytics.Worker.Replay;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using ConferenceProFlow.Analytics.Worker.Observability;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var builder = Host.CreateApplicationBuilder(args);
+
+// M4.2B - OpenTelemetry tracing foundation
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("conferenceproflow-analytics-worker"))
+    .WithTracing(tracing =>
+    {
+        tracing.AddSource(AnalyticsTelemetry.SourceName);
+
+        if (builder.Environment.IsDevelopment() &&
+            builder.Configuration.GetValue<bool>("Observability:ConsoleExporter:Enabled"))
+        {
+            tracing.AddConsoleExporter();
+        }
+    });
+
 var replayEnabled = builder.Configuration.GetValue<bool>("AnalyticsReplay:Enabled");
 var liveConsumerEnabled = builder.Configuration.GetValue<bool>("AnalyticsKafkaConsumer:Enabled");
 var liveConnection = builder.Configuration.GetConnectionString("AnalyticsDb");
@@ -61,6 +79,9 @@ if (!replayEnabled)
     else
         builder.Services.AddHostedService<KafkaAnalyticsConsumerService>();
 }
+
+ConferenceProFlow.Analytics.Worker.Observability.JaegerOtlpExporterRegistration.Configure(
+    builder.Services, builder.Configuration, builder.Environment);
 
 using var host = builder.Build();
 if (replayEnabled)

@@ -1,4 +1,4 @@
-﻿using ConferenceProFlow.Allocation.Worker.Domain.Entities;
+using ConferenceProFlow.Allocation.Worker.Domain.Entities;
 using ConferenceProFlow.Allocation.Worker.Messaging.Outbox;
 using AllocationEntity = ConferenceProFlow.Allocation.Worker.Domain.Entities.Allocation;
 using Microsoft.EntityFrameworkCore;
@@ -130,6 +130,13 @@ public sealed class AllocationDbContext : DbContext
 
             entity.Property(x => x.ProcessedAtUtc);
 
+            // Optional W3C trace context; existing Inbox rows remain valid.
+            entity.Property(x => x.TraceParent)
+                .HasMaxLength(55);
+
+            entity.Property(x => x.TraceState)
+                .HasMaxLength(512);
+
             entity.HasIndex(x => x.RegistrationId)
                 .IsUnique()
                 .HasDatabaseName("UX_InboxMessages_RegistrationId");
@@ -172,6 +179,14 @@ public sealed class AllocationDbContext : DbContext
 
             entity.Property(x => x.OccurredAtUtc)
                 .IsRequired();
+
+            // Durable W3C trace context for Allocation result publication.
+            // Nullable for previously created Outbox rows.
+            entity.Property(x => x.TraceParent)
+                .HasMaxLength(55);
+
+            entity.Property(x => x.TraceState)
+                .HasMaxLength(512);
 
             entity.Property(x => x.PublishedAtUtc);
 

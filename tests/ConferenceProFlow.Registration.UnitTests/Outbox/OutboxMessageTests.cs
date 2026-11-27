@@ -286,4 +286,49 @@ public sealed class OutboxMessageTests
         Assert.Throws<InvalidOperationException>(() =>
             message.MarkPublished(quarantinedAtUtc.AddMinutes(1)));
     }
+
+    [Fact]
+    public void Create_WithValidTraceContext_PreservesContext()
+    {
+        const string traceParent =
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        const string traceState = "vendor=value";
+
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            DateTimeOffset.UtcNow,
+            traceParent,
+            traceState);
+
+        Assert.Equal(traceParent, message.TraceParent);
+        Assert.Equal(traceState, message.TraceState);
+    }
+
+    [Fact]
+    public void Create_WithoutTraceContext_AllowsLegacyMessages()
+    {
+        var message = OutboxMessage.Create(
+            Guid.NewGuid(),
+            RegistrationRequestedV1.MessageType,
+            "{}",
+            DateTimeOffset.UtcNow);
+
+        Assert.Null(message.TraceParent);
+        Assert.Null(message.TraceState);
+    }
+
+    [Fact]
+    public void Create_WithInvalidTraceParent_ThrowsArgumentException()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            OutboxMessage.Create(
+                Guid.NewGuid(),
+                RegistrationRequestedV1.MessageType,
+                "{}",
+                DateTimeOffset.UtcNow,
+                "invalid-traceparent"));
+    }
 }

@@ -2,6 +2,7 @@ using ConferenceProFlow.Registration.Api.Domain.Enums;
 using ConferenceProFlow.Registration.Api.Infrastructure.Outbox;
 using ConferenceProFlow.Registration.Api.Infrastructure.Persistence;
 using ConferenceProFlow.Registration.Api.Messaging.Contracts;
+using ConferenceProFlow.Registration.Api.Observability;
 using Microsoft.EntityFrameworkCore;
 
 namespace ConferenceProFlow.Registration.Api.Infrastructure.Inbox;
@@ -33,9 +34,10 @@ public sealed class AllocationResultReconciliationService
             }
             catch (DbUpdateException ex) when (SqlServerErrors.IsUniqueViolation(ex))
             {
-                // A concurrent consumer could have committed this message or registration decision. Discard stale tracked entities before reading the database again; never retry SaveChanges blindly.
+                // A concurrent consumer could have committed this message or registration decision.
+                // Discard stale tracked entities before reading the database again;
+                // never retry SaveChanges blindly.
                 _db.ChangeTracker.Clear();
-
                 if (attempt == MaxUniqueConflictAttempts)
                     throw;
             }
@@ -58,13 +60,13 @@ public sealed class AllocationResultReconciliationService
                 : AllocationResultReconciliationResult.Conflict;
 
         // One logical Allocation decision is allowed per RegistrationId.
-        // Duplicate business decisions are safe even if a different MessageId was used; mismatched allocation IDs or outcomes are conflicts.
+        // Duplicate business decisions are safe even if a different MessageId was used;
+        // mismatched allocation IDs or outcomes are conflicts.
         var existingDecisions = await _db.AllocationResultInboxMessages
             .AsNoTracking()
             .Where(x => x.AllocationId == result.AllocationId ||
                         x.RegistrationId == result.RegistrationId)
             .ToListAsync(cancellationToken);
-
         if (existingDecisions.Count > 0)
         {
             return existingDecisions.Count == 1 &&
@@ -75,7 +77,6 @@ public sealed class AllocationResultReconciliationService
 
         var registration = await _db.Registrations
             .SingleOrDefaultAsync(x => x.Id == result.RegistrationId, cancellationToken);
-
         if (registration is null)
             return AllocationResultReconciliationResult.UnknownRegistration;
 
@@ -94,7 +95,6 @@ public sealed class AllocationResultReconciliationService
         {
             if (registration.Status == RegistrationStatus.Rejected)
                 return AllocationResultReconciliationResult.Conflict;
-
             if (registration.Status == RegistrationStatus.Pending)
                 registration.Confirm(updatedAtUtc);
         }
@@ -107,12 +107,12 @@ public sealed class AllocationResultReconciliationService
             {
                 return AllocationResultReconciliationResult.Conflict;
             }
-
             if (registration.Status == RegistrationStatus.Pending)
                 registration.Reject(reason, updatedAtUtc);
         }
 
-        _db.AllocationResultInboxMessages.Add(AllocationResultInboxMessage.Create(result, DateTimeOffset.UtcNow));
+        _db.AllocationResultInboxMessages.Add(
+            AllocationResultInboxMessage.Create(result, DateTimeOffset.UtcNow));
 
         if (isNewFinalization)
         {
@@ -123,7 +123,14 @@ public sealed class AllocationResultReconciliationService
                 : RegistrationFinalizedV1.RejectedStatus;
             var analyticsEvent = RegistrationFinalizedV1.Create(
                 registration.Id, registration.SessionId, finalStatus, updatedAtUtc);
-            _db.AnalyticsOutboxMessages.Add(AnalyticsOutboxMessage.FromEvent(analyticsEvent));
+
+            // Capture the current RabbitMQ consumer span before SaveChanges.
+            // This is durable across Kafka-publisher restarts and replay attempts.
+            // If tracing is unavailable, the business transaction still succeeds.
+            var trace = AnalyticsOutboxTraceContext.Capture();
+            _db.AnalyticsOutboxMessages.Add(
+                AnalyticsOutboxMessage.FromEvent(
+                    analyticsEvent, trace.TraceParent, trace.TraceState));
         }
 
         // EF Core relational SaveChanges is atomic: status, result Inbox and

@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using Confluent.Kafka;
 using ConferenceProFlow.Analytics.Worker.Application.Processing;
 using ConferenceProFlow.Analytics.Worker.Configuration;
+using ConferenceProFlow.Analytics.Worker.Observability;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
@@ -44,6 +46,7 @@ public sealed class KafkaAnalyticsConsumerService(
         await Task.Yield();
         var settings = options.Value;
         var config = CreateConsumerConfig(settings);
+
         logger.LogInformation(
             "M3.4E durable Analytics consumer starting: topic={Topic}, group={Group}. " +
             "SQL-first processing; explicit Kafka offset commits after durable handling.",
@@ -63,25 +66,50 @@ public sealed class KafkaAnalyticsConsumerService(
                     if (record?.Message is null)
                         continue; // Partition EOF / no user record.
 
-                    // Each record gets a fresh EF Core DbContext and scoped
-                    // services. SQL errors propagate rather than being treated
-                    // as malformed Kafka payloads.
-                    KafkaAnalyticsRecordDisposition disposition;
-                    await using (var scope = scopeFactory.CreateAsyncScope())
+                    // Each record gets its own span with a bounded lifetime.
+                    // M4.2B previously used a using declaration directly in this
+                    // loop; that could keep a span alive until the loop exited.
+                    using (var activity = KafkaAnalyticsConsumerTelemetry
+                        .StartProcessingActivity(record.Message.Headers))
                     {
-                        var handler = scope.ServiceProvider.GetRequiredService<KafkaAnalyticsRecordHandler>();
-                        disposition = await handler.HandleAsync(record, stoppingToken);
-                    }
+                        activity?.SetTag("messaging.destination.name", record.Topic);
 
-                    // No code path reaches here without a committed SQL
-                    // processing transaction, a recognized durable duplicate,
-                    // or a committed quarantine insert.
-                    // Commit(record) acknowledges the NEXT offset in its partition.
-                    consumer.Commit(record);
-                    logger.LogInformation(
-                        "Analytics Kafka record handled: topic={Topic}, partition={Partition}, " +
-                        "offset={Offset}, disposition={Disposition}; offset committed.",
-                        record.Topic, record.Partition.Value, record.Offset.Value, disposition);
+                        try
+                        {
+                            // Each record gets a fresh EF Core DbContext and scoped
+                            // services. SQL errors propagate rather than being treated
+                            // as malformed Kafka payloads.
+                            KafkaAnalyticsRecordDisposition disposition;
+                            await using (var scope = scopeFactory.CreateAsyncScope())
+                            {
+                                var handler = scope.ServiceProvider
+                                    .GetRequiredService<KafkaAnalyticsRecordHandler>();
+                                disposition = await handler.HandleAsync(record, stoppingToken);
+                            }
+
+                            // No code path reaches here without a committed SQL
+                            // processing transaction, a recognized durable duplicate,
+                            // or a committed quarantine insert.
+                            // Commit(record) acknowledges the NEXT offset in its partition.
+                            consumer.Commit(record);
+
+                            activity?.SetTag(
+                                "conferenceproflow.analytics.disposition",
+                                disposition.ToString());
+
+                            logger.LogInformation(
+                                "Analytics Kafka record handled: topic={Topic}, partition={Partition}, " +
+                                "offset={Offset}, disposition={Disposition}; offset committed.",
+                                record.Topic, record.Partition.Value, record.Offset.Value, disposition);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            // Mark telemetry, but preserve existing SQL-first, fail-fast
+                            // semantics: rethrow so the consumer session is recreated.
+                            activity?.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
+                            throw;
+                        }
+                    }
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
