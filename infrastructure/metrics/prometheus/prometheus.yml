@@ -1,0 +1,16 @@
+# M4.3D1: Prometheus self-scrape validates collection even before applications run.
+# Application metrics are PUSHED to the built-in OTLP receiver; no app scrape targets.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+# Keep the resource/service identity useful in PromQL without unbounded labels.
+otlp:
+  promote_resource_attributes:
+    - service.name
+    - deployment.environment.name
