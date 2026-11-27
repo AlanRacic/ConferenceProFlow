@@ -8,7 +8,6 @@ using Microsoft.EntityFrameworkCore;
 using ConferenceProFlow.Allocation.Worker.Observability;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
-
 var builder = Host.CreateApplicationBuilder(args);
 
 // M4.2B - OpenTelemetry tracing foundation
@@ -17,7 +16,6 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(tracing =>
     {
         tracing.AddSource(AllocationTelemetry.SourceName);
-
         if (builder.Environment.IsDevelopment() &&
             builder.Configuration.GetValue<bool>("Observability:ConsoleExporter:Enabled"))
         {
@@ -29,19 +27,16 @@ var connectionString = builder.Configuration.GetConnectionString("AllocationDb")
     ?? throw new InvalidOperationException("Connection string 'AllocationDb' is not configured.");
 
 builder.Services.AddDbContext<AllocationDbContext>(options => options.UseSqlServer(connectionString));
-
 builder.Services.AddScoped<InboxReceiveService>();
 builder.Services.AddScoped<AllocationProcessingService>();
 
 builder.Services.Configure<AllocationInboxProcessorOptions>(builder.Configuration.GetSection(AllocationInboxProcessorOptions.SectionName));
-
 var rabbitMqConsumerEnabled = builder.Configuration.GetValue<bool>("RabbitMqConsumer:Enabled");
 var inboxProcessorEnabled = builder.Configuration.GetValue<bool>("AllocationInboxProcessor:Enabled");
 var allocationOutboxPublisherEnabled = builder.Configuration.GetValue<bool>("AllocationOutboxPublisher:Enabled");
 
 if (rabbitMqConsumerEnabled)
     builder.Services.AddHostedService<RegistrationRequestConsumerService>();
-
 if (inboxProcessorEnabled)
     builder.Services.AddHostedService<AllocationInboxProcessorService>();
 
@@ -54,8 +49,11 @@ if (!rabbitMqConsumerEnabled &&
 {
     builder.Services.AddHostedService<AllocationBackgroundService>();
 }
-
 ConferenceProFlow.Allocation.Worker.Observability.JaegerOtlpExporterRegistration.Configure(
+    builder.Services, builder.Configuration, builder.Environment);
+
+// M4.3C1 - opt-in Allocation SQL Inbox attempt metrics (no messaging changes).
+AllocationMetricsConfiguration.Configure(
     builder.Services, builder.Configuration, builder.Environment);
 
 await builder.Build().RunAsync();

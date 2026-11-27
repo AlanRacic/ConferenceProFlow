@@ -140,9 +140,13 @@ public sealed class AllocationInboxProcessorService : BackgroundService
             await using var processingScope = _scopeFactory.CreateAsyncScope();
             var processor = processingScope.ServiceProvider.GetRequiredService<AllocationProcessingService>();
 
+            // Measure the actual ProcessAsync attempt, not the queue polling interval.
+            // Stopwatch uses a monotonic clock and does not change processing behavior.
+            var processingStart = Stopwatch.GetTimestamp();
             try
             {
                 var result = await processor.ProcessAsync(messageId, cancellationToken);
+                AllocationInboxMetrics.RecordResult(result, Stopwatch.GetElapsedTime(processingStart));
                 activity?.SetTag("conferenceproflow.allocation.processing.result", result.ToString());
 
                 if (result is AllocationProcessingResult.WaitingForInventory
@@ -170,6 +174,7 @@ public sealed class AllocationInboxProcessorService : BackgroundService
                 // Keep the existing retry behavior; observability only records the failure.
                 activity?.SetStatus(ActivityStatusCode.Error, exception.GetType().Name);
                 activity?.SetTag("conferenceproflow.allocation.processing.result", "error");
+                AllocationInboxMetrics.RecordFailure(Stopwatch.GetElapsedTime(processingStart));
                 Defer(messageId);
                 _logger.LogError(
                     exception,
